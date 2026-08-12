@@ -5,6 +5,7 @@
 #include "PlayerbotAIConfig.h"
 #include "Playerbots.h"
 #include "ScriptMgr.h"
+#include "StrictAltbotHolder.h"
 #include "StrictAltbotMgr.h"
 
 void AddSC_strict_altbot_commandscript();
@@ -21,7 +22,9 @@ public:
         {
             WORLDHOOK_ON_AFTER_CONFIG_LOAD,
             WORLDHOOK_ON_BEFORE_WORLD_INITIALIZED,
-            WORLDHOOK_ON_STARTUP
+            WORLDHOOK_ON_UPDATE,
+            WORLDHOOK_ON_STARTUP,
+            WORLDHOOK_ON_SHUTDOWN
         })
     {
     }
@@ -55,13 +58,23 @@ public:
     {
         sStrictAltbotMgr->LoadRoster();
     }
+
+    void OnUpdate(uint32 diff) override
+    {
+        sStrictAltbotHolder->Update(diff);
+    }
+
+    void OnShutdown() override
+    {
+        sStrictAltbotHolder->Shutdown();
+    }
 };
 
 class StrictAltbotGuildPlayerScript final : public PlayerScript
 {
 public:
     StrictAltbotGuildPlayerScript() : PlayerScript(
-        "StrictAltbotGuildPlayerScript", { PLAYERHOOK_ON_UPDATE })
+        "StrictAltbotGuildPlayerScript", { PLAYERHOOK_ON_UPDATE, PLAYERHOOK_ON_LOGOUT })
     {
     }
 
@@ -85,6 +98,12 @@ public:
         botAI->SetCheat(BotCheatMask(static_cast<uint32>(botAI->GetCheat()) | NormalBotCheatMask));
         if ((NormalBotCheatMask & static_cast<uint32>(BotCheatMask::taxi)) && !player->isTaxiCheater())
             player->SetTaxiCheater(true);
+    }
+
+    void OnPlayerLogout(Player* player) override
+    {
+        if (sStrictAltbotMgr->IsStrictAltbot(player->GetGUID().GetCounter()))
+            sStrictAltbotHolder->RemoveBot(player->GetGUID());
     }
 };
 
