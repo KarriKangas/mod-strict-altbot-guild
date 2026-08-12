@@ -2,6 +2,8 @@
 #include "CharacterCache.h"
 #include "Chat.h"
 #include "DatabaseEnv.h"
+#include "Guild.h"
+#include "GuildMgr.h"
 #include "ObjectMgr.h"
 #include "Player.h"
 #include "QueryResult.h"
@@ -24,6 +26,7 @@ using namespace Acore::ChatCommands;
 namespace
 {
 constexpr uint32 StrictBotCount = 40;
+constexpr char StrictGuildName[] = "Strict Altbots";
 
 std::string GetAccountName(uint32 number)
 {
@@ -51,7 +54,8 @@ public:
     {
         static ChatCommandTable strictBotTable =
         {
-            { "create", HandleCreate, SEC_ADMINISTRATOR, Console::Yes }
+            { "create", HandleCreate, SEC_ADMINISTRATOR, Console::Yes },
+            { "guild",  HandleGuild,  SEC_ADMINISTRATOR, Console::No  }
         };
 
         static ChatCommandTable commandTable =
@@ -63,6 +67,78 @@ public:
     }
 
 private:
+    static bool HandleGuild(ChatHandler* handler)
+    {
+        Player* owner = handler->GetPlayer();
+        if (!owner)
+            return false;
+
+        Guild* guild = sGuildMgr->GetGuildByName(StrictGuildName);
+        if (!guild)
+        {
+            if (owner->GetGuildId())
+            {
+                handler->PSendSysMessage(
+                    "{} is already in a guild. Leave it before creating '{}'.",
+                    owner->GetName(), StrictGuildName);
+                return true;
+            }
+
+            guild = new Guild();
+            if (!guild->Create(owner, StrictGuildName))
+            {
+                delete guild;
+                handler->PSendSysMessage("Could not create guild '{}'.", StrictGuildName);
+                return true;
+            }
+
+            sGuildMgr->AddGuild(guild);
+        }
+
+        if (guild->GetLeaderGUID() != owner->GetGUID())
+        {
+            handler->PSendSysMessage(
+                "Guild '{}' already exists, but {} is not its guild master.",
+                StrictGuildName, owner->GetName());
+            return true;
+        }
+
+        QueryResult roster = CharacterDatabase.Query(
+            "SELECT `character_guid` FROM `strict_altbots` WHERE `enabled` = 1");
+
+        uint32 added = 0;
+        uint32 alreadyMembers = 0;
+        uint32 skipped = 0;
+
+        if (roster)
+        {
+            do
+            {
+                ObjectGuid guid = ObjectGuid::Create<HighGuid::Player>(roster->Fetch()[0].Get<uint32>());
+                uint32 currentGuildId = sCharacterCache->GetCharacterGuildIdByGuid(guid);
+
+                if (currentGuildId == guild->GetId())
+                {
+                    ++alreadyMembers;
+                    continue;
+                }
+
+                if (currentGuildId || !guild->AddMember(guid))
+                {
+                    ++skipped;
+                    continue;
+                }
+
+                ++added;
+            } while (roster->NextRow());
+        }
+
+        handler->PSendSysMessage(
+            "Guild '{}' ready: {} bot(s) added, {} already members, {} skipped, {} total members.",
+            StrictGuildName, added, alreadyMembers, skipped, guild->GetMemberSize());
+        return true;
+    }
+
     static bool HandleCreate(ChatHandler* handler)
     {
         if (!sStrictAltbotMgr->IsEnabled())
