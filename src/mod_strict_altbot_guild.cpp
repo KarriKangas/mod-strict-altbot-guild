@@ -3,6 +3,8 @@
 #include "ScriptMgr.h"
 #include "StrictAltbotMgr.h"
 
+void AddSC_strict_altbot_commandscript();
+
 class StrictAltbotGuildWorldScript final : public WorldScript
 {
 public:
@@ -34,4 +36,5 @@ public:
 void Addmod_strict_altbot_guildScripts()
 {
     new StrictAltbotGuildWorldScript();
+    AddSC_strict_altbot_commandscript();
 }
