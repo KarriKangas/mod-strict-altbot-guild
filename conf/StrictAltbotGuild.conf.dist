@@ -1,3 +1,28 @@
 [worldserver]
 
 StrictAltbotGuild.Enable = 1
+
+# Strict Altbots only equip upgrades they actually loot.
+AiPlayerbot.AutoGearCommandAltBots = 0
+AiPlayerbot.AutoEquipUpgradeLoot = 1
+
+# Do not manufacture supplies, skills, spells, gear helpers, or progression for Altbots.
+AiPlayerbot.AltMaintenanceAmmo = 0
+AiPlayerbot.AltMaintenanceFood = 0
+AiPlayerbot.AltMaintenanceReagents = 0
+AiPlayerbot.AltMaintenanceConsumables = 0
+AiPlayerbot.AltMaintenancePotions = 0
+AiPlayerbot.AltMaintenanceBags = 0
+AiPlayerbot.AltMaintenanceMounts = 0
+AiPlayerbot.AltMaintenanceSkills = 0
+AiPlayerbot.AltMaintenanceClassSpells = 0
+AiPlayerbot.AltMaintenanceAvailableSpells = 0
+AiPlayerbot.AltMaintenanceSpecialSpells = 0
+AiPlayerbot.AltMaintenanceTalentTree = 0
+AiPlayerbot.AltMaintenanceGlyphs = 0
+AiPlayerbot.AltMaintenanceGemsEnchants = 0
+AiPlayerbot.AltMaintenancePet = 0
+AiPlayerbot.AltMaintenancePetTalents = 0
+AiPlayerbot.AltMaintenanceReputation = 0
+AiPlayerbot.AltMaintenanceAttunementQuests = 0
+AiPlayerbot.AltMaintenanceKeyring = 0
