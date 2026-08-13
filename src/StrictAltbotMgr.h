@@ -14,6 +14,7 @@ public:
 
     void LoadRoster();
     bool IsStrictAltbot(uint32 characterGuid) const;
+    std::unordered_set<uint32> const& GetRoster() const { return _strictAltbots; }
     std::size_t GetRosterSize() const { return _strictAltbots.size(); }
 
 private:
