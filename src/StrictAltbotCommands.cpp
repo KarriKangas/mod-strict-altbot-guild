@@ -108,6 +108,12 @@ std::string GetItemIcon(ItemTemplate const* itemTemplate)
     return display && display->inventoryIcon ? display->inventoryIcon : "";
 }
 
+void AppendArmorSubclass(std::ostringstream& out, ItemTemplate const* itemTemplate)
+{
+    if (itemTemplate && itemTemplate->Class == ITEM_CLASS_ARMOR)
+        out << ",\"armorSubclass\":" << itemTemplate->SubClass;
+}
+
 void AppendItem(std::ostringstream& out, Item const* item)
 {
     if (!item || !item->GetTemplate())
@@ -124,8 +130,9 @@ void AppendItem(std::ostringstream& out, Item const* item)
         << ",\"icon\":\"" << EscapeJson(GetItemIcon(itemTemplate)) << '"'
         << ",\"itemLevel\":" << itemTemplate->ItemLevel
         << ",\"requiredLevel\":" << itemTemplate->RequiredLevel
-        << ",\"armor\":" << itemTemplate->Armor
-        << ",\"damageMin\":" << itemTemplate->Damage[0].DamageMin
+        << ",\"armor\":" << itemTemplate->Armor;
+    AppendArmorSubclass(out, itemTemplate);
+    out << ",\"damageMin\":" << itemTemplate->Damage[0].DamageMin
         << ",\"damageMax\":" << itemTemplate->Damage[0].DamageMax
         << ",\"speed\":" << itemTemplate->Delay
         << ",\"durability\":" << item->GetUInt32Value(ITEM_FIELD_DURABILITY)
@@ -190,8 +197,9 @@ void AppendItemTemplate(std::ostringstream& out, ItemTemplate const* itemTemplat
         << ",\"icon\":\"" << EscapeJson(GetItemIcon(itemTemplate)) << '"'
         << ",\"itemLevel\":" << itemTemplate->ItemLevel
         << ",\"requiredLevel\":" << itemTemplate->RequiredLevel
-        << ",\"armor\":" << itemTemplate->Armor
-        << ",\"damageMin\":" << itemTemplate->Damage[0].DamageMin
+        << ",\"armor\":" << itemTemplate->Armor;
+    AppendArmorSubclass(out, itemTemplate);
+    out << ",\"damageMin\":" << itemTemplate->Damage[0].DamageMin
         << ",\"damageMax\":" << itemTemplate->Damage[0].DamageMax
         << ",\"speed\":" << itemTemplate->Delay
         << ",\"durability\":0"
@@ -228,6 +236,29 @@ void GetBagUsage(Player* player, uint32& used, uint32& total)
             used += bag->GetBagSize() - bag->GetFreeSlots();
         }
     }
+}
+
+uint32 GetRosterItemLevel(Player* player)
+{
+    uint32 totalItemLevel = 0;
+    uint32 equippedItems = 0;
+
+    for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
+    {
+        Item* item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
+        ItemTemplate const* itemTemplate = item ? item->GetTemplate() : nullptr;
+        if (!itemTemplate || !itemTemplate->ItemLevel)
+            continue;
+
+        totalItemLevel += itemTemplate->ItemLevel;
+        ++equippedItems;
+    }
+
+    if (!equippedItems)
+        return 0;
+
+    // Match the frontend's Math.round(sum / populated equipment slots).
+    return (totalItemLevel + equippedItems / 2) / equippedItems;
 }
 
 std::string GetAreaName(Player* player)
@@ -383,7 +414,7 @@ std::string BuildRosterJson()
             << ",\"classId\":" << static_cast<uint32>(player ? player->getClass() : cache ? cache->Class : 0)
             << ",\"raceId\":" << static_cast<uint32>(race)
             << ",\"faction\":\"" << GetFactionName(team) << '"'
-            << ",\"itemLevel\":" << (botAI ? botAI->GetEquipGearScore(player) : 0)
+            << ",\"itemLevel\":" << (player ? GetRosterItemLevel(player) : 0)
             << ",\"online\":" << (player ? "true" : "false");
 
         if (player)
