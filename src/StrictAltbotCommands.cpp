@@ -35,7 +35,8 @@ using namespace Acore::ChatCommands;
 namespace
 {
 constexpr uint32 StrictBotCount = 40;
-constexpr char StrictGuildName[] = "Strict Altbots";
+constexpr char AllianceStrictGuildName[] = "Strict Altbots";
+constexpr char HordeStrictGuildName[] = "Strict Altbots Horde";
 constexpr char AquariumPrefix[] = "ALTBO_JSON ";
 
 std::string EscapeJson(std::string_view value)
@@ -121,10 +122,57 @@ void AppendItem(std::ostringstream& out, Item const* item)
         << ",\"count\":" << item->GetCount()
         << ",\"quality\":" << itemTemplate->Quality
         << ",\"icon\":\"" << EscapeJson(GetItemIcon(itemTemplate)) << '"'
+        << ",\"itemLevel\":" << itemTemplate->ItemLevel
+        << ",\"requiredLevel\":" << itemTemplate->RequiredLevel
+        << ",\"armor\":" << itemTemplate->Armor
+        << ",\"damageMin\":" << itemTemplate->Damage[0].DamageMin
+        << ",\"damageMax\":" << itemTemplate->Damage[0].DamageMax
+        << ",\"speed\":" << itemTemplate->Delay
         << ",\"durability\":" << item->GetUInt32Value(ITEM_FIELD_DURABILITY)
         << ",\"maxDurability\":" << item->GetUInt32Value(ITEM_FIELD_MAXDURABILITY)
+        << ",\"vendorValue\":" << itemTemplate->SellPrice
         << ",\"soulbound\":" << (item->IsSoulBound() ? "true" : "false")
-        << '}';
+        << ",\"stats\":[";
+
+    for (uint32 index = 0; index < itemTemplate->StatsCount; ++index)
+    {
+        if (index)
+            out << ',';
+        out << "{\"type\":" << itemTemplate->ItemStat[index].ItemStatType
+            << ",\"value\":" << itemTemplate->ItemStat[index].ItemStatValue << '}';
+    }
+
+    out << "],\"enchants\":[";
+    bool firstEnchant = true;
+    for (EnchantmentSlot slot : { PERM_ENCHANTMENT_SLOT, TEMP_ENCHANTMENT_SLOT })
+    {
+        uint32 enchantId = item->GetEnchantmentId(slot);
+        SpellItemEnchantmentEntry const* enchant = sSpellItemEnchantmentStore.LookupEntry(enchantId);
+        if (!enchantId)
+            continue;
+        if (!firstEnchant)
+            out << ',';
+        firstEnchant = false;
+        out << "{\"id\":" << enchantId << ",\"name\":\""
+            << EscapeJson(enchant && enchant->description[LOCALE_enUS] ? enchant->description[LOCALE_enUS] : "Enchanted") << "\"}";
+    }
+
+    out << "],\"gems\":[";
+    bool firstGem = true;
+    for (uint32 slot = SOCK_ENCHANTMENT_SLOT; slot < SOCK_ENCHANTMENT_SLOT + MAX_GEM_SOCKETS; ++slot)
+    {
+        uint32 enchantId = item->GetEnchantmentId(EnchantmentSlot(slot));
+        SpellItemEnchantmentEntry const* enchant = sSpellItemEnchantmentStore.LookupEntry(enchantId);
+        if (!enchant || !enchant->GemID)
+            continue;
+        ItemTemplate const* gem = sObjectMgr->GetItemTemplate(enchant->GemID);
+        if (!firstGem)
+            out << ',';
+        firstGem = false;
+        out << "{\"id\":" << enchant->GemID << ",\"name\":\""
+            << EscapeJson(gem ? gem->Name1 : "Socketed gem") << "\"}";
+    }
+    out << "]}";
 }
 
 void GetBagUsage(Player* player, uint32& used, uint32& total)
@@ -472,22 +520,26 @@ private:
         if (!owner)
             return false;
 
-        Guild* guild = sGuildMgr->GetGuildByName(StrictGuildName);
+        TeamId ownerTeam = owner->GetTeamId();
+        char const* strictGuildName = ownerTeam == TEAM_HORDE ? HordeStrictGuildName : AllianceStrictGuildName;
+        char const* factionName = ownerTeam == TEAM_HORDE ? "Horde" : "Alliance";
+
+        Guild* guild = sGuildMgr->GetGuildByName(strictGuildName);
         if (!guild)
         {
             if (owner->GetGuildId())
             {
                 handler->PSendSysMessage(
                     "{} is already in a guild. Leave it before creating '{}'.",
-                    owner->GetName(), StrictGuildName);
+                    owner->GetName(), strictGuildName);
                 return true;
             }
 
             guild = new Guild();
-            if (!guild->Create(owner, StrictGuildName))
+            if (!guild->Create(owner, strictGuildName))
             {
                 delete guild;
-                handler->PSendSysMessage("Could not create guild '{}'.", StrictGuildName);
+                handler->PSendSysMessage("Could not create guild '{}'.", strictGuildName);
                 return true;
             }
 
@@ -498,7 +550,7 @@ private:
         {
             handler->PSendSysMessage(
                 "Guild '{}' already exists, but {} is not its guild master.",
-                StrictGuildName, owner->GetName());
+                strictGuildName, owner->GetName());
             return true;
         }
 
@@ -506,7 +558,9 @@ private:
             "SELECT `character_guid` FROM `strict_altbots` WHERE `enabled` = 1");
 
         uint32 added = 0;
+        uint32 moved = 0;
         uint32 alreadyMembers = 0;
+        uint32 otherFaction = 0;
         uint32 skipped = 0;
 
         if (roster)
@@ -514,6 +568,13 @@ private:
             do
             {
                 ObjectGuid guid = ObjectGuid::Create<HighGuid::Player>(roster->Fetch()[0].Get<uint32>());
+
+                if (sCharacterCache->GetCharacterTeamByGuid(guid) != ownerTeam)
+                {
+                    ++otherFaction;
+                    continue;
+                }
+
                 uint32 currentGuildId = sCharacterCache->GetCharacterGuildIdByGuid(guid);
 
                 if (currentGuildId == guild->GetId())
@@ -522,19 +583,37 @@ private:
                     continue;
                 }
 
-                if (currentGuildId || !guild->AddMember(guid))
+                Guild* currentGuild = nullptr;
+                if (currentGuildId)
                 {
+                    currentGuild = sGuildMgr->GetGuildById(currentGuildId);
+                    if (!currentGuild || currentGuild->GetLeaderGUID() == guid)
+                    {
+                        ++skipped;
+                        continue;
+                    }
+
+                    currentGuild->DeleteMember(guid, false, true);
+                }
+
+                if (!guild->AddMember(guid))
+                {
+                    if (currentGuild)
+                        currentGuild->AddMember(guid);
                     ++skipped;
                     continue;
                 }
 
+                if (currentGuild)
+                    ++moved;
                 ++added;
             } while (roster->NextRow());
         }
 
         handler->PSendSysMessage(
-            "Guild '{}' ready: {} bot(s) added, {} already members, {} skipped, {} total members.",
-            StrictGuildName, added, alreadyMembers, skipped, guild->GetMemberSize());
+            "Guild '{}' ready for {}: {} bot(s) added, {} moved from another guild, {} already members, "
+            "{} other-faction bot(s) ignored, {} skipped, {} total members.",
+            strictGuildName, factionName, added, moved, alreadyMembers, otherFaction, skipped, guild->GetMemberSize());
         return true;
     }
 
