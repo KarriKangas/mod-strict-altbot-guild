@@ -10,6 +10,7 @@ public:
     static StrictAltbotHolder* instance();
 
     void Update(uint32 diff);
+    void UpdateRpgServices(Player* bot);
     void RemoveBot(ObjectGuid guid);
     void Shutdown();
 

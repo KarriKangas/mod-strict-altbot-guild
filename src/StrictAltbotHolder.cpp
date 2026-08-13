@@ -1,18 +1,257 @@
 #include "StrictAltbotHolder.h"
 
+#include "AiObjectContext.h"
+#include "BudgetValues.h"
+#include "Creature.h"
 #include "DatabaseEnv.h"
+#include "Event.h"
 #include "Guild.h"
 #include "GuildMgr.h"
+#include "ItemUsageValue.h"
 #include "Log.h"
 #include "ObjectAccessor.h"
+#include "ObjectMgr.h"
 #include "Player.h"
 #include "PlayerbotAI.h"
 #include "PlayerbotAIConfig.h"
 #include "Playerbots.h"
 #include "QueryResult.h"
 #include "StrictAltbotMgr.h"
+#include "Timer.h"
+#include "Trainer.h"
+#include "TravelMgr.h"
 #include "World.h"
 #include "WorldSession.h"
+
+#include <cmath>
+#include <optional>
+#include <unordered_map>
+
+namespace
+{
+constexpr float MaxVendorTripDistance = 5000.0f;
+
+std::unordered_map<ObjectGuid, WorldPosition> VendorTrips;
+std::unordered_map<ObjectGuid, uint32> LastServiceChecks;
+
+uint8 GetBagSpace(PlayerbotAI* botAI)
+{
+    if (Value<uint8>* value = botAI->GetAiObjectContext()->GetValue<uint8>("bag space"))
+        return value->Get();
+
+    return 0;
+}
+
+uint32 GetFreeMoney(PlayerbotAI* botAI, NeedMoneyFor purpose)
+{
+    if (Value<uint32>* value = botAI->GetAiObjectContext()->GetValue<uint32>(
+            "free money for", static_cast<int32>(purpose)))
+    {
+        return value->Get();
+    }
+
+    return 0;
+}
+
+uint32 GetItemCountForUsage(PlayerbotAI* botAI, ItemUsage usage)
+{
+    std::string qualifier = "usage " + std::to_string(static_cast<uint32>(usage));
+    if (Value<uint32>* value = botAI->GetAiObjectContext()->GetValue<uint32>("item count", qualifier))
+        return value->Get();
+
+    return 0;
+}
+
+bool NeedsToSell(PlayerbotAI* botAI)
+{
+    if (GetBagSpace(botAI) <= 80)
+        return false;
+
+    return GetItemCountForUsage(botAI, ITEM_USAGE_VENDOR) + GetItemCountForUsage(botAI, ITEM_USAGE_AH) > 0;
+}
+
+bool CanAffordRepair(PlayerbotAI* botAI)
+{
+    Value<uint32>* value = botAI->GetAiObjectContext()->GetValue<uint32>("repair cost");
+    uint32 repairCost = value ? value->Get() : 0;
+    return repairCost > 0 && repairCost <= GetFreeMoney(botAI, NeedMoneyFor::repair);
+}
+
+bool IsUsableServiceNpc(Player* bot, Creature* npc)
+{
+    return npc && npc->IsInWorld() && !npc->IsDuringRemoveFromWorld() && npc->IsAlive() &&
+           npc->GetReactionTo(bot) > REP_UNFRIENDLY;
+}
+
+bool TrainerHasAffordableSpell(Player* bot, PlayerbotAI* botAI, Creature* npc)
+{
+    Trainer::Trainer* trainer = sObjectMgr->GetTrainer(npc->GetEntry());
+    if (!trainer || !trainer->IsTrainerValidForPlayer(bot))
+        return false;
+
+    // Do not accidentally pick a brand-new profession merely because the bot wandered past
+    // an unrestricted profession trainer. Trainers for professions it already knows remain valid.
+    if (trainer->GetTrainerType() == Trainer::Type::Tradeskill && !trainer->GetTrainerRequirement())
+        return false;
+
+    float discount = bot->GetReputationPriceDiscount(npc);
+    uint32 freeMoney = GetFreeMoney(botAI, NeedMoneyFor::spells);
+
+    for (Trainer::Spell const& spell : trainer->GetSpells())
+    {
+        Trainer::Spell const* trainerSpell = trainer->GetSpell(spell.SpellId);
+        if (!trainerSpell || !trainer->CanTeachSpell(bot, trainerSpell))
+            continue;
+
+        uint32 cost = static_cast<uint32>(std::floor(trainerSpell->MoneyCost * discount));
+        if (freeMoney >= cost)
+            return true;
+    }
+
+    return false;
+}
+
+std::optional<NeedMoneyFor> GetPurchaseBudget(ItemUsage usage)
+{
+    switch (usage)
+    {
+        case ITEM_USAGE_REPLACE:
+        case ITEM_USAGE_EQUIP:
+        case ITEM_USAGE_BAD_EQUIP:
+        case ITEM_USAGE_BROKEN_EQUIP:
+            return NeedMoneyFor::gear;
+        case ITEM_USAGE_AMMO:
+            return NeedMoneyFor::ammo;
+        case ITEM_USAGE_QUEST:
+            return NeedMoneyFor::anything;
+        case ITEM_USAGE_USE:
+            return NeedMoneyFor::consumables;
+        case ITEM_USAGE_SKILL:
+            return NeedMoneyFor::tradeskill;
+        default:
+            return std::nullopt;
+    }
+}
+
+bool VendorHasUsefulAffordableItem(Player* bot, PlayerbotAI* botAI, Creature* npc)
+{
+    if (GetBagSpace(botAI) >= 100)
+        return false;
+
+    VendorItemData const* items = npc->GetVendorItems();
+    if (!items)
+        return false;
+
+    float discount = bot->GetReputationPriceDiscount(npc);
+    for (VendorItem const* vendorItem : items->m_items)
+    {
+        if (!vendorItem || vendorItem->ExtendedCost)
+            continue;
+
+        if (vendorItem->maxcount && !npc->GetVendorItemCurrentCount(vendorItem))
+            continue;
+
+        ItemTemplate const* item = sObjectMgr->GetItemTemplate(vendorItem->item);
+        if (!item)
+            continue;
+
+        Value<ItemUsage>* usageValue = botAI->GetAiObjectContext()->GetValue<ItemUsage>(
+            "item usage", std::to_string(vendorItem->item));
+        if (!usageValue)
+            continue;
+
+        std::optional<NeedMoneyFor> budget = GetPurchaseBudget(usageValue->Get());
+        if (!budget)
+            continue;
+
+        uint32 price = static_cast<uint32>(std::floor(item->BuyPrice * discount));
+        if (GetFreeMoney(botAI, *budget) >= price)
+            return true;
+    }
+
+    return false;
+}
+
+template <typename Predicate>
+Creature* FindNpc(Player* bot, GuidVector const& targets, Predicate&& predicate)
+{
+    for (ObjectGuid const& guid : targets)
+    {
+        Creature* npc = ObjectAccessor::GetCreatureOrPetOrVehicle(*bot, guid);
+        if (IsUsableServiceNpc(bot, npc) && predicate(npc))
+            return npc;
+    }
+
+    return nullptr;
+}
+
+Creature* ChooseServiceNpc(Player* bot, PlayerbotAI* botAI, GuidVector const& targets, bool needsSell)
+{
+    if (needsSell)
+    {
+        // Every normal vendor can buy items, so the closest one is the right one.
+        return FindNpc(bot, targets, [](Creature* npc) { return npc->HasNpcFlag(UNIT_NPC_FLAG_VENDOR); });
+    }
+
+    if (CanAffordRepair(botAI))
+    {
+        if (Creature* npc = FindNpc(
+                bot, targets, [](Creature* candidate) { return candidate->HasNpcFlag(UNIT_NPC_FLAG_REPAIR); }))
+        {
+            return npc;
+        }
+    }
+
+    if (Creature* npc = FindNpc(bot, targets, [bot, botAI](Creature* candidate)
+        {
+            return candidate->HasNpcFlag(UNIT_NPC_FLAG_TRAINER) &&
+                   TrainerHasAffordableSpell(bot, botAI, candidate);
+        }))
+    {
+        return npc;
+    }
+
+    return FindNpc(bot, targets, [bot, botAI](Creature* candidate)
+    {
+        return candidate->HasNpcFlag(UNIT_NPC_FLAG_VENDOR) &&
+               VendorHasUsefulAffordableItem(bot, botAI, candidate);
+    });
+}
+
+std::optional<WorldPosition> FindNearestVendor(Player* bot)
+{
+    float bestDistance = MaxVendorTripDistance;
+    std::optional<WorldPosition> bestPosition;
+
+    for (auto const& [spawnId, data] : sObjectMgr->GetAllCreatureData())
+    {
+        if (data.mapid != bot->GetMapId() || !(data.phaseMask & bot->GetPhaseMask()))
+            continue;
+
+        CreatureTemplate const* creatureInfo = sObjectMgr->GetCreatureTemplate(data.id);
+        if (!creatureInfo)
+            continue;
+
+        uint32 npcFlags = data.npcflag ? data.npcflag : creatureInfo->npcflag;
+        if (!(npcFlags & UNIT_NPC_FLAG_VENDOR))
+            continue;
+
+        FactionTemplateEntry const* faction = sFactionTemplateStore.LookupEntry(creatureInfo->faction);
+        if (!faction || Unit::GetFactionReactionTo(bot->GetFactionTemplateEntry(), faction) <= REP_UNFRIENDLY)
+            continue;
+
+        WorldPosition position(data.mapid, data.posX, data.posY, data.posZ, data.orientation);
+        float distance = bot->GetExactDist(position);
+        if (distance >= bestDistance)
+            continue;
+
+        bestDistance = distance;
+        bestPosition = position;
+    }
+
+    return bestPosition;
+}
+}
 
 StrictAltbotHolder* StrictAltbotHolder::instance()
 {
@@ -139,8 +378,80 @@ void StrictAltbotHolder::EnableAutonomy(Player* bot)
     }
 }
 
+void StrictAltbotHolder::UpdateRpgServices(Player* bot)
+{
+    PlayerbotAI* botAI = GET_PLAYERBOT_AI(bot);
+    if (!botAI || botAI->rpgInfo.GetStatus() != RPG_WANDER_NPC)
+        return;
+
+    uint32& lastCheck = LastServiceChecks[bot->GetGUID()];
+    if (lastCheck && GetMSTimeDiffToNow(lastCheck) < 1000)
+        return;
+    lastCheck = getMSTime();
+
+    auto* wander = std::get_if<NewRpgInfo::WanderNpc>(&botAI->rpgInfo.data);
+    if (!wander)
+        return;
+
+    bool needsSell = NeedsToSell(botAI);
+    Value<GuidVector>* targetsValue = botAI->GetAiObjectContext()->GetValue<GuidVector>("possible new rpg targets");
+    GuidVector targets = targetsValue ? targetsValue->Get() : GuidVector{};
+    Creature* serviceNpc = ChooseServiceNpc(bot, botAI, targets, needsSell);
+
+    if (!serviceNpc)
+    {
+        auto trip = VendorTrips.find(bot->GetGUID());
+        if (needsSell && trip == VendorTrips.end())
+        {
+            if (std::optional<WorldPosition> vendorPosition = FindNearestVendor(bot))
+            {
+                VendorTrips[bot->GetGUID()] = *vendorPosition;
+                botAI->rpgInfo.ChangeToGoCamp(*vendorPosition);
+                return;
+            }
+        }
+
+        // A remembered trip reaching an empty/disabled spawn should not loop forever.
+        if (trip != VendorTrips.end())
+            VendorTrips.erase(trip);
+
+        botAI->rpgInfo.ChangeToIdle();
+        return;
+    }
+
+    VendorTrips.erase(bot->GetGUID());
+
+    if (wander->npcOrGo != serviceNpc->GetGUID())
+    {
+        wander->npcOrGo = serviceNpc->GetGUID();
+        wander->lastReach = 0;
+    }
+
+    if (!serviceNpc->IsWithinDistInMap(bot, INTERACTION_DISTANCE))
+        return;
+
+    bot->SetTarget(serviceNpc->GetGUID());
+    bot->SetFacingToObject(serviceNpc);
+
+    if (needsSell && serviceNpc->HasNpcFlag(UNIT_NPC_FLAG_VENDOR))
+        botAI->DoSpecificAction("sell", Event("strict altbot rpg", "vendor"), true);
+
+    if (serviceNpc->HasNpcFlag(UNIT_NPC_FLAG_REPAIR) && CanAffordRepair(botAI))
+        botAI->DoSpecificAction("repair", Event("strict altbot rpg"), true);
+
+    if (serviceNpc->HasNpcFlag(UNIT_NPC_FLAG_TRAINER) && TrainerHasAffordableSpell(bot, botAI, serviceNpc))
+        botAI->DoSpecificAction("trainer", Event("strict altbot rpg", "learn"), true);
+
+    if (serviceNpc->HasNpcFlag(UNIT_NPC_FLAG_VENDOR) && VendorHasUsefulAffordableItem(bot, botAI, serviceNpc))
+        botAI->DoSpecificAction("buy", Event("strict altbot rpg", "vendor"), true);
+
+    botAI->rpgInfo.ChangeToIdle();
+}
+
 void StrictAltbotHolder::RemoveBot(ObjectGuid guid)
 {
+    VendorTrips.erase(guid);
+    LastServiceChecks.erase(guid);
     RemoveFromPlayerbotsMap(guid);
 }
 
@@ -148,5 +459,7 @@ void StrictAltbotHolder::Shutdown()
 {
     _shuttingDown = true;
     _loading.clear();
+    VendorTrips.clear();
+    LastServiceChecks.clear();
     LogoutAllBots();
 }

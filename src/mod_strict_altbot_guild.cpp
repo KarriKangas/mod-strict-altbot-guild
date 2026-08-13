@@ -129,6 +129,7 @@ public:
                 player->SetTaxiCheater(false);
             if (botAI->rpgInfo.GetStatus() == RPG_REST)
                 botAI->rpgInfo.ChangeToWanderRandom();
+            sStrictAltbotHolder->UpdateRpgServices(player);
             return;
         }
 
