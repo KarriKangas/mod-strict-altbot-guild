@@ -74,8 +74,42 @@ class StrictAltbotGuildPlayerScript final : public PlayerScript
 {
 public:
     StrictAltbotGuildPlayerScript() : PlayerScript(
-        "StrictAltbotGuildPlayerScript", { PLAYERHOOK_ON_UPDATE, PLAYERHOOK_ON_LOGOUT })
+        "StrictAltbotGuildPlayerScript",
+        {
+            PLAYERHOOK_ON_UPDATE,
+            PLAYERHOOK_ON_LOGOUT,
+            PLAYERHOOK_CAN_PLAYER_USE_CHAT,
+            PLAYERHOOK_CAN_PLAYER_USE_PRIVATE_CHAT,
+            PLAYERHOOK_CAN_PLAYER_USE_GROUP_CHAT,
+            PLAYERHOOK_CAN_PLAYER_USE_GUILD_CHAT,
+            PLAYERHOOK_CAN_PLAYER_USE_CHANNEL_CHAT
+        })
     {
+    }
+
+    bool OnPlayerCanUseChat(Player* player, uint32, uint32, std::string&) override
+    {
+        return CanUseChat(player);
+    }
+
+    bool OnPlayerCanUseChat(Player* player, uint32, uint32, std::string&, Player*) override
+    {
+        return CanUseChat(player);
+    }
+
+    bool OnPlayerCanUseChat(Player* player, uint32, uint32, std::string&, Group*) override
+    {
+        return CanUseChat(player);
+    }
+
+    bool OnPlayerCanUseChat(Player* player, uint32, uint32, std::string&, Guild*) override
+    {
+        return CanUseChat(player);
+    }
+
+    bool OnPlayerCanUseChat(Player* player, uint32, uint32, std::string&, Channel*) override
+    {
+        return CanUseChat(player);
     }
 
     void OnPlayerUpdate(Player* player, uint32 /*diff*/) override
@@ -90,6 +124,7 @@ public:
         if (sStrictAltbotMgr->IsStrictAltbot(player->GetGUID().GetCounter()))
         {
             botAI->SetCheat(BotCheatMask::none);
+            player->CleanupChannels();
             if (player->isTaxiCheater())
                 player->SetTaxiCheater(false);
             if (botAI->rpgInfo.GetStatus() == RPG_REST)
@@ -106,6 +141,12 @@ public:
     {
         if (sStrictAltbotMgr->IsStrictAltbot(player->GetGUID().GetCounter()))
             sStrictAltbotHolder->RemoveBot(player->GetGUID());
+    }
+
+private:
+    static bool CanUseChat(Player* player)
+    {
+        return !player || !sStrictAltbotMgr->IsStrictAltbot(player->GetGUID().GetCounter());
     }
 };
 
