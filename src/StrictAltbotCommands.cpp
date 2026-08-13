@@ -175,6 +175,42 @@ void AppendItem(std::ostringstream& out, Item const* item)
     out << "]}";
 }
 
+void AppendItemTemplate(std::ostringstream& out, ItemTemplate const* itemTemplate, uint32 count)
+{
+    if (!itemTemplate)
+    {
+        out << "null";
+        return;
+    }
+
+    out << "{\"id\":" << itemTemplate->ItemId
+        << ",\"name\":\"" << EscapeJson(itemTemplate->Name1) << '"'
+        << ",\"count\":" << count
+        << ",\"quality\":" << itemTemplate->Quality
+        << ",\"icon\":\"" << EscapeJson(GetItemIcon(itemTemplate)) << '"'
+        << ",\"itemLevel\":" << itemTemplate->ItemLevel
+        << ",\"requiredLevel\":" << itemTemplate->RequiredLevel
+        << ",\"armor\":" << itemTemplate->Armor
+        << ",\"damageMin\":" << itemTemplate->Damage[0].DamageMin
+        << ",\"damageMax\":" << itemTemplate->Damage[0].DamageMax
+        << ",\"speed\":" << itemTemplate->Delay
+        << ",\"durability\":0"
+        << ",\"maxDurability\":0"
+        << ",\"vendorValue\":" << itemTemplate->SellPrice
+        << ",\"soulbound\":false"
+        << ",\"stats\":[";
+
+    for (uint32 index = 0; index < itemTemplate->StatsCount; ++index)
+    {
+        if (index)
+            out << ',';
+        out << "{\"type\":" << itemTemplate->ItemStat[index].ItemStatType
+            << ",\"value\":" << itemTemplate->ItemStat[index].ItemStatValue << '}';
+    }
+
+    out << "],\"enchants\":[],\"gems\":[]}";
+}
+
 void GetBagUsage(Player* player, uint32& used, uint32& total)
 {
     used = 0;
@@ -200,6 +236,15 @@ std::string GetAreaName(Player* player)
         return area->area_name[LOCALE_enUS];
 
     return {};
+}
+
+char const* GetFactionName(TeamId team)
+{
+    if (team == TEAM_HORDE)
+        return "horde";
+    if (team == TEAM_ALLIANCE)
+        return "alliance";
+    return "";
 }
 
 void AppendStrategies(std::ostringstream& out, PlayerbotAI* botAI)
@@ -229,7 +274,22 @@ void AppendObjectives(std::ostringstream& out, Quest const* quest, QuestStatusDa
         uint32 id = rawId < 0 ? static_cast<uint32>(-rawId) : static_cast<uint32>(rawId);
         out << "{\"kind\":\"" << (rawId < 0 ? "object" : "creature") << "\",\"id\":" << id
             << ",\"current\":" << (status ? status->CreatureOrGOCount[index] : 0)
-            << ",\"required\":" << quest->RequiredNpcOrGoCount[index] << '}';
+            << ",\"required\":" << quest->RequiredNpcOrGoCount[index];
+
+        if (rawId < 0)
+        {
+            GameObjectTemplate const* gameObject = sObjectMgr->GetGameObjectTemplate(id);
+            if (gameObject)
+                out << ",\"name\":\"" << EscapeJson(gameObject->name) << '"';
+        }
+        else
+        {
+            CreatureTemplate const* creature = sObjectMgr->GetCreatureTemplate(id);
+            if (creature)
+                out << ",\"name\":\"" << EscapeJson(creature->Name) << '"';
+        }
+
+        out << '}';
     }
 
     for (uint8 index = 0; index < QUEST_ITEM_OBJECTIVES_COUNT; ++index)
@@ -242,7 +302,9 @@ void AppendObjectives(std::ostringstream& out, Quest const* quest, QuestStatusDa
         first = false;
         out << "{\"kind\":\"item\",\"id\":" << quest->RequiredItemId[index]
             << ",\"current\":" << (status ? status->ItemCount[index] : 0)
-            << ",\"required\":" << quest->RequiredItemCount[index] << '}';
+            << ",\"required\":" << quest->RequiredItemCount[index] << ",\"item\":";
+        AppendItemTemplate(out, sObjectMgr->GetItemTemplate(quest->RequiredItemId[index]), 1);
+        out << '}';
     }
 
     if (quest->GetPlayersSlain())
@@ -253,6 +315,38 @@ void AppendObjectives(std::ostringstream& out, Quest const* quest, QuestStatusDa
             << (status ? status->PlayerCount : 0) << ",\"required\":" << quest->GetPlayersSlain() << '}';
     }
     out << ']';
+}
+
+void AppendQuestRewards(std::ostringstream& out, Quest const* quest)
+{
+    out << "{\"guaranteed\":[";
+    bool first = true;
+    for (uint32 index = 0; index < quest->GetRewItemsCount(); ++index)
+    {
+        uint32 itemId = quest->RewardItemId[index];
+        ItemTemplate const* itemTemplate = itemId ? sObjectMgr->GetItemTemplate(itemId) : nullptr;
+        if (!itemTemplate)
+            continue;
+        if (!first)
+            out << ',';
+        first = false;
+        AppendItemTemplate(out, itemTemplate, quest->RewardItemIdCount[index]);
+    }
+
+    out << "],\"choices\":[";
+    first = true;
+    for (uint32 index = 0; index < quest->GetRewChoiceItemsCount(); ++index)
+    {
+        uint32 itemId = quest->RewardChoiceItemId[index];
+        ItemTemplate const* itemTemplate = itemId ? sObjectMgr->GetItemTemplate(itemId) : nullptr;
+        if (!itemTemplate)
+            continue;
+        if (!first)
+            out << ',';
+        first = false;
+        AppendItemTemplate(out, itemTemplate, quest->RewardChoiceItemCount[index]);
+    }
+    out << "]}";
 }
 
 std::string BuildRosterJson()
@@ -280,12 +374,16 @@ std::string BuildRosterJson()
         CharacterCacheEntry const* cache = sCharacterCache->GetCharacterCacheByGuid(guid);
         Player* player = ObjectAccessor::FindConnectedPlayer(guid);
         PlayerbotAI* botAI = player ? GET_PLAYERBOT_AI(player) : nullptr;
+        uint8 race = player ? player->getRace() : cache ? cache->Race : 0;
+        TeamId team = player ? player->GetTeamId() : Player::TeamIdForRace(race);
 
         out << "{\"guid\":" << roster[index]
             << ",\"name\":\"" << EscapeJson(player ? player->GetName() : cache ? cache->Name : "Unknown") << '"'
             << ",\"level\":" << static_cast<uint32>(player ? player->GetLevel() : cache ? cache->Level : 0)
             << ",\"classId\":" << static_cast<uint32>(player ? player->getClass() : cache ? cache->Class : 0)
-            << ",\"raceId\":" << static_cast<uint32>(player ? player->getRace() : cache ? cache->Race : 0)
+            << ",\"raceId\":" << static_cast<uint32>(race)
+            << ",\"faction\":\"" << GetFactionName(team) << '"'
+            << ",\"itemLevel\":" << (botAI ? botAI->GetEquipGearScore(player) : 0)
             << ",\"online\":" << (player ? "true" : "false");
 
         if (player)
@@ -417,6 +515,8 @@ std::string BuildSnapshotJson(uint32 lowGuid)
             << "\",\"status\":" << static_cast<uint32>(player->GetQuestStatus(questId))
             << ",\"timerMs\":" << (status ? status->Timer : 0) << ",\"objectives\":";
         AppendObjectives(out, quest, status);
+        out << ",\"rewards\":";
+        AppendQuestRewards(out, quest);
         out << '}';
     }
     out << "]}";
