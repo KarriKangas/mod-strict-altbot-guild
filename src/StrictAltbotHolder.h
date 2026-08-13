@@ -18,6 +18,7 @@ protected:
 
 private:
     void LoginBot(ObjectGuid guid, uint32 accountId);
+    void EnableAutonomy(Player* bot);
 
     uint32 _updateTimer = 0;
     uint32 _lastOnlineCount = 0;

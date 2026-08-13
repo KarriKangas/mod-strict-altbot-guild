@@ -92,6 +92,8 @@ public:
             botAI->SetCheat(BotCheatMask::none);
             if (player->isTaxiCheater())
                 player->SetTaxiCheater(false);
+            if (botAI->rpgInfo.GetStatus() == RPG_REST)
+                botAI->rpgInfo.ChangeToWanderRandom();
             return;
         }
 

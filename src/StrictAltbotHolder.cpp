@@ -49,7 +49,10 @@ void StrictAltbotHolder::Update(uint32 diff)
                 if (player->GetSession()->IsBot())
                 {
                     if (!GetPlayerBot(guid))
-                        OnBotLogin(player);
+                    {
+                        PlayerbotHolder::OnBotLogin(player);
+                        EnableAutonomy(player);
+                    }
                     ++onlineCount;
                 }
                 continue;
@@ -110,6 +113,15 @@ void StrictAltbotHolder::OnBotLoginInternal(Player* bot)
 
     bot->SetTaxiCheater(false);
     LOG_INFO("server.loading", "StrictAltbotGuild: {} logged in", bot->GetName());
+}
+
+void StrictAltbotHolder::EnableAutonomy(Player* bot)
+{
+    if (PlayerbotAI* botAI = GET_PLAYERBOT_AI(bot))
+    {
+        botAI->ChangeStrategy("+new rpg,+grind,+lfg", BOT_STATE_NON_COMBAT);
+        LOG_INFO("server.loading", "StrictAltbotGuild: {} autonomous strategies enabled", bot->GetName());
+    }
 }
 
 void StrictAltbotHolder::RemoveBot(ObjectGuid guid)
