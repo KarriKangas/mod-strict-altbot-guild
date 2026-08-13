@@ -1,6 +1,8 @@
 #include "StrictAltbotHolder.h"
 
 #include "DatabaseEnv.h"
+#include "Guild.h"
+#include "GuildMgr.h"
 #include "Log.h"
 #include "ObjectAccessor.h"
 #include "Player.h"
@@ -112,6 +114,19 @@ void StrictAltbotHolder::OnBotLoginInternal(Player* bot)
     }
 
     bot->SetTaxiCheater(false);
+
+    if (Guild* guild = sGuildMgr->GetGuildById(bot->GetGuildId()))
+    {
+        if (auto const* member = guild->GetMember(bot->GetGUID());
+            member && guild->HasRankRight(bot, GR_RIGHT_GCHATSPEAK))
+        {
+            uint32 rights = guild->GetRankRights(member->GetRankId());
+            rights &= ~(GR_RIGHT_GCHATSPEAK ^ GR_RIGHT_EMPTY);
+            guild->HandleSetRankInfo(member->GetRankId(), rights);
+            LOG_INFO("server.loading", "StrictAltbotGuild: muted guild rank {}", member->GetRankId());
+        }
+    }
+
     LOG_INFO("server.loading", "StrictAltbotGuild: {} logged in", bot->GetName());
 }
 
