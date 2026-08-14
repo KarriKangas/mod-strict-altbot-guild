@@ -11,6 +11,8 @@ public:
 
     void Update(uint32 diff);
     void UpdateRpgServices(Player* bot);
+    void RecordFirstLogin(Player* bot);
+    void RecordLevelUp(Player* bot, uint8 oldLevel);
     void RemoveBot(ObjectGuid guid);
     void Shutdown();
 

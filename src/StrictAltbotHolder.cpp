@@ -259,6 +259,48 @@ StrictAltbotHolder* StrictAltbotHolder::instance()
     return &instance;
 }
 
+void StrictAltbotHolder::RecordFirstLogin(Player* bot)
+{
+    CharacterDatabase.Execute(
+        "UPDATE `strict_altbots` SET `first_login_at` = NOW(), `first_login_played_seconds` = {} "
+        "WHERE `character_guid` = {} AND `first_login_at` IS NULL",
+        bot->GetTotalPlayedTime(), bot->GetGUID().GetCounter());
+}
+
+void StrictAltbotHolder::RecordLevelUp(Player* bot, uint8 oldLevel)
+{
+    uint8 newLevel = bot->GetLevel();
+    if (newLevel <= oldLevel)
+        return;
+
+    uint32 characterGuid = bot->GetGUID().GetCounter();
+    uint32 totalPlayed = bot->GetTotalPlayedTime();
+    uint32 firstLoginPlayed = totalPlayed;
+
+    QueryResult result = CharacterDatabase.Query(
+        "SELECT `first_login_played_seconds` FROM `strict_altbots` "
+        "WHERE `character_guid` = {} AND `first_login_at` IS NOT NULL",
+        characterGuid);
+
+    if (result)
+        firstLoginPlayed = result->Fetch()[0].Get<uint32>();
+    else
+        RecordFirstLogin(bot);
+
+    uint32 playedSinceFirstLogin = totalPlayed >= firstLoginPlayed
+        ? totalPlayed - firstLoginPlayed
+        : 0;
+
+    for (uint16 level = uint16(oldLevel) + 1; level <= newLevel; ++level)
+    {
+        CharacterDatabase.Execute(
+            "INSERT IGNORE INTO `strict_altbot_levelups` "
+            "(`character_guid`, `level`, `total_played_seconds`, `played_since_first_login_seconds`) "
+            "VALUES ({}, {}, {}, {})",
+            characterGuid, level, totalPlayed, playedSinceFirstLogin);
+    }
+}
+
 void StrictAltbotHolder::Update(uint32 diff)
 {
     if (_shuttingDown || !sStrictAltbotMgr->IsEnabled())
@@ -346,6 +388,8 @@ void StrictAltbotHolder::LoginBot(ObjectGuid guid, uint32 accountId)
 
 void StrictAltbotHolder::OnBotLoginInternal(Player* bot)
 {
+    RecordFirstLogin(bot);
+
     if (PlayerbotAI* botAI = GET_PLAYERBOT_AI(bot))
     {
         botAI->SetMaster(nullptr);

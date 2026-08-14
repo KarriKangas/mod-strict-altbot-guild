@@ -76,6 +76,7 @@ public:
     StrictAltbotGuildPlayerScript() : PlayerScript(
         "StrictAltbotGuildPlayerScript",
         {
+            PLAYERHOOK_ON_LEVEL_CHANGED,
             PLAYERHOOK_ON_UPDATE,
             PLAYERHOOK_ON_LOGOUT,
             PLAYERHOOK_CAN_PLAYER_USE_CHAT,
@@ -110,6 +111,12 @@ public:
     bool OnPlayerCanUseChat(Player* player, uint32, uint32, std::string&, Channel*) override
     {
         return CanUseChat(player);
+    }
+
+    void OnPlayerLevelChanged(Player* player, uint8 oldLevel) override
+    {
+        if (player && sStrictAltbotMgr->IsStrictAltbot(player->GetGUID().GetCounter()))
+            sStrictAltbotHolder->RecordLevelUp(player, oldLevel);
     }
 
     void OnPlayerUpdate(Player* player, uint32 /*diff*/) override
