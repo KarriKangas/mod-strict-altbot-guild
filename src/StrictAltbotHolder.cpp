@@ -263,7 +263,8 @@ void StrictAltbotHolder::RecordFirstLogin(Player* bot)
 {
     CharacterDatabase.Execute(
         "UPDATE `strict_altbots` SET `first_login_at` = NOW(), `first_login_played_seconds` = {} "
-        "WHERE `character_guid` = {} AND `first_login_at` IS NULL",
+        "WHERE `character_guid` = {} AND `enabled` = 1 AND `retired_at` IS NULL "
+        "AND `first_login_at` IS NULL",
         bot->GetTotalPlayedTime(), bot->GetGUID().GetCounter());
 }
 
@@ -273,13 +274,17 @@ void StrictAltbotHolder::RecordLevelUp(Player* bot, uint8 oldLevel)
     if (newLevel <= oldLevel)
         return;
 
+    if (!sStrictAltbotMgr->IsStrictAltbot(bot->GetGUID().GetCounter()))
+        return;
+
     uint32 characterGuid = bot->GetGUID().GetCounter();
     uint32 totalPlayed = bot->GetTotalPlayedTime();
     uint32 firstLoginPlayed = totalPlayed;
 
     QueryResult result = CharacterDatabase.Query(
         "SELECT `first_login_played_seconds` FROM `strict_altbots` "
-        "WHERE `character_guid` = {} AND `first_login_at` IS NOT NULL",
+        "WHERE `character_guid` = {} AND `enabled` = 1 AND `retired_at` IS NULL "
+        "AND `first_login_at` IS NOT NULL",
         characterGuid);
 
     if (result)
@@ -317,7 +322,7 @@ void StrictAltbotHolder::Update(uint32 diff)
 
     QueryResult roster = CharacterDatabase.Query(
         "SELECT `character_guid`, `account_id` FROM `strict_altbots` "
-        "WHERE `enabled` = 1 AND `always_online` = 1");
+        "WHERE `enabled` = 1 AND `always_online` = 1 AND `retired_at` IS NULL");
 
     if (roster)
     {
@@ -343,6 +348,27 @@ void StrictAltbotHolder::Update(uint32 diff)
 
             LoginBot(guid, accountId);
         } while (roster->NextRow());
+    }
+
+    for (auto callback = _loginCallbacks.begin(); callback != _loginCallbacks.end();)
+    {
+        ObjectGuid guid = callback->first;
+        if (!sStrictAltbotMgr->IsStrictAltbot(guid.GetCounter()))
+        {
+            callback = _loginCallbacks.erase(callback);
+            continue;
+        }
+
+        Player* bot = ObjectAccessor::FindConnectedPlayer(guid);
+        if (!bot)
+        {
+            ++callback;
+            continue;
+        }
+
+        auto pending = std::move(callback->second);
+        callback = _loginCallbacks.erase(callback);
+        pending(bot);
     }
 
     if (onlineCount != _lastOnlineCount)
@@ -372,6 +398,13 @@ void StrictAltbotHolder::LoginBot(ObjectGuid guid, uint32 accountId)
             if (strictHolder->_shuttingDown || ObjectAccessor::FindConnectedPlayer(loginHolder.GetGuid()))
                 return;
 
+            QueryResult activeRoster = CharacterDatabase.Query(
+                "SELECT 1 FROM `strict_altbots` "
+                "WHERE `character_guid` = {} AND `enabled` = 1 AND `retired_at` IS NULL",
+                loginHolder.GetGuid().GetCounter());
+            if (!activeRoster)
+                return;
+
             WorldSession* session = new WorldSession(
                 loginHolder.GetAccountId(), "", 0, nullptr, SEC_PLAYER,
                 EXPANSION_WRATH_OF_THE_LICH_KING, time(nullptr),
@@ -388,6 +421,12 @@ void StrictAltbotHolder::LoginBot(ObjectGuid guid, uint32 accountId)
 
 void StrictAltbotHolder::OnBotLoginInternal(Player* bot)
 {
+    if (!sStrictAltbotMgr->IsStrictAltbot(bot->GetGUID().GetCounter()))
+    {
+        LOG_WARN("server.loading", "StrictAltbotGuild: ignoring login hook for inactive bot {}", bot->GetName());
+        return;
+    }
+
     RecordFirstLogin(bot);
 
     if (PlayerbotAI* botAI = GET_PLAYERBOT_AI(bot))
@@ -411,6 +450,17 @@ void StrictAltbotHolder::OnBotLoginInternal(Player* bot)
     }
 
     LOG_INFO("server.loading", "StrictAltbotGuild: {} logged in", bot->GetName());
+}
+
+void StrictAltbotHolder::QueueOnBotLogin(ObjectGuid guid, std::function<void(Player*)> callback)
+{
+    if (Player* bot = ObjectAccessor::FindConnectedPlayer(guid))
+    {
+        callback(bot);
+        return;
+    }
+
+    _loginCallbacks[guid] = std::move(callback);
 }
 
 void StrictAltbotHolder::EnableAutonomy(Player* bot)
@@ -496,6 +546,7 @@ void StrictAltbotHolder::RemoveBot(ObjectGuid guid)
 {
     VendorTrips.erase(guid);
     LastServiceChecks.erase(guid);
+    _loginCallbacks.erase(guid);
     RemoveFromPlayerbotsMap(guid);
 }
 
@@ -503,6 +554,7 @@ void StrictAltbotHolder::Shutdown()
 {
     _shuttingDown = true;
     _loading.clear();
+    _loginCallbacks.clear();
     VendorTrips.clear();
     LastServiceChecks.clear();
     LogoutAllBots();

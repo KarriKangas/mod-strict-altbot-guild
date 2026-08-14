@@ -25,7 +25,8 @@ void StrictAltbotMgr::LoadRoster()
         return;
 
     QueryResult result = CharacterDatabase.Query(
-        "SELECT `character_guid` FROM `strict_altbots` WHERE `enabled` = 1");
+        "SELECT `character_guid` FROM `strict_altbots` "
+        "WHERE `enabled` = 1 AND `retired_at` IS NULL");
 
     if (result)
     {

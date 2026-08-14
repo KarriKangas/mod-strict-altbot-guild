@@ -2,6 +2,8 @@
 
 #include "PlayerbotMgr.h"
 
+#include <functional>
+#include <unordered_map>
 #include <unordered_set>
 
 class StrictAltbotHolder final : public PlayerbotHolder
@@ -14,6 +16,7 @@ public:
     void RecordFirstLogin(Player* bot);
     void RecordLevelUp(Player* bot, uint8 oldLevel);
     void RemoveBot(ObjectGuid guid);
+    void QueueOnBotLogin(ObjectGuid guid, std::function<void(Player*)> callback);
     void Shutdown();
 
 protected:
@@ -27,6 +30,7 @@ private:
     uint32 _lastOnlineCount = 0;
     bool _shuttingDown = false;
     std::unordered_set<ObjectGuid> _loading;
+    std::unordered_map<ObjectGuid, std::function<void(Player*)>> _loginCallbacks;
 };
 
 #define sStrictAltbotHolder StrictAltbotHolder::instance()
