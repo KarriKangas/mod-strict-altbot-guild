@@ -612,6 +612,60 @@ std::string BuildHistoryJson(uint32 lowGuid)
     return out.str();
 }
 
+std::string BuildBenchmarksJson()
+{
+    QueryResult bots = CharacterDatabase.Query(
+        "SELECT sa.`character_guid`, c.`name`, c.`race`, c.`class`, c.`level`, "
+        "UNIX_TIMESTAMP(sa.`first_login_at`), COALESCE(UNIX_TIMESTAMP(sa.`retired_at`), 0) "
+        "FROM `strict_altbots` sa "
+        "INNER JOIN `characters` c ON c.`guid` = sa.`character_guid` "
+        "WHERE sa.`first_login_at` IS NOT NULL "
+        "ORDER BY sa.`first_login_at`, sa.`character_guid`");
+
+    std::ostringstream out;
+    out << "{\"version\":1,\"bots\":[";
+    bool first = true;
+    if (bots)
+    {
+        do
+        {
+            Field* fields = bots->Fetch();
+            if (!first)
+                out << ',';
+            first = false;
+            out << "{\"guid\":" << fields[0].Get<uint32>()
+                << ",\"name\":\"" << EscapeJson(fields[1].Get<std::string>()) << '"'
+                << ",\"raceId\":" << static_cast<uint32>(fields[2].Get<uint8>())
+                << ",\"classId\":" << static_cast<uint32>(fields[3].Get<uint8>())
+                << ",\"level\":" << static_cast<uint32>(fields[4].Get<uint8>())
+                << ",\"firstLoginAt\":" << fields[5].Get<uint32>()
+                << ",\"retiredAt\":" << fields[6].Get<uint32>() << '}';
+        } while (bots->NextRow());
+    }
+
+    out << "],\"levelups\":[";
+    QueryResult levelups = CharacterDatabase.Query(
+        "SELECT `character_guid`, `level`, `played_since_first_login_seconds` "
+        "FROM `strict_altbot_levelups` ORDER BY `character_guid`, `level`");
+    first = true;
+    if (levelups)
+    {
+        do
+        {
+            Field* fields = levelups->Fetch();
+            if (!first)
+                out << ',';
+            first = false;
+            out << "{\"guid\":" << fields[0].Get<uint32>()
+                << ",\"level\":" << static_cast<uint32>(fields[1].Get<uint8>())
+                << ",\"seconds\":" << fields[2].Get<uint32>() << '}';
+        } while (levelups->NextRow());
+    }
+
+    out << "]}";
+    return out.str();
+}
+
 std::string GetAccountName(uint32 number)
 {
     std::ostringstream name;
@@ -897,9 +951,10 @@ public:
     {
         static ChatCommandTable aquariumTable =
         {
-            { "roster",  HandleAquariumRoster,  SEC_ADMINISTRATOR, Console::Yes },
-            { "inspect", HandleAquariumInspect, SEC_ADMINISTRATOR, Console::Yes },
-            { "history", HandleAquariumHistory, SEC_ADMINISTRATOR, Console::Yes }
+            { "roster",     HandleAquariumRoster,     SEC_ADMINISTRATOR, Console::Yes },
+            { "inspect",    HandleAquariumInspect,    SEC_ADMINISTRATOR, Console::Yes },
+            { "history",    HandleAquariumHistory,    SEC_ADMINISTRATOR, Console::Yes },
+            { "benchmarks", HandleAquariumBenchmarks, SEC_ADMINISTRATOR, Console::Yes }
         };
 
         static ChatCommandTable retireTable =
@@ -940,6 +995,12 @@ private:
     static bool HandleAquariumHistory(ChatHandler* handler, uint32 characterGuid)
     {
         SendAquariumJson(handler, BuildHistoryJson(characterGuid));
+        return true;
+    }
+
+    static bool HandleAquariumBenchmarks(ChatHandler* handler)
+    {
+        SendAquariumJson(handler, BuildBenchmarksJson());
         return true;
     }
 
