@@ -1,4 +1,5 @@
 #include "Config.h"
+#include "Item.h"
 #include "Log.h"
 #include "Player.h"
 #include "PlayerbotAI.h"
@@ -8,11 +9,92 @@
 #include "StrictAltbotHolder.h"
 #include "StrictAltbotMgr.h"
 
+#include <unordered_set>
+
 void AddSC_strict_altbot_commandscript();
 
 namespace
 {
+constexpr uint32 HunterAmmoRestockThreshold = 200;
+
 uint32 NormalBotCheatMask = 0;
+std::unordered_set<ObjectGuid> HunterAmmoTripsWithSuppressedGrind;
+
+uint32 GetHunterAmmoCount(PlayerbotAI* botAI)
+{
+    auto* value = botAI->GetAiObjectContext()->GetValue<uint32>("item count", "ammo");
+    return value ? value->Get() : 0;
+}
+
+bool HasHunterAmmoWeapon(Player* player)
+{
+    if (!player || player->getClass() != CLASS_HUNTER)
+        return false;
+
+    Item* rangedWeapon = player->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_RANGED);
+    if (!rangedWeapon || !rangedWeapon->GetTemplate())
+        return false;
+
+    switch (rangedWeapon->GetTemplate()->SubClass)
+    {
+        case ITEM_SUBCLASS_WEAPON_GUN:
+        case ITEM_SUBCLASS_WEAPON_BOW:
+        case ITEM_SUBCLASS_WEAPON_CROSSBOW:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool IsHunterAmmoTrip(Player* player, PlayerbotAI* botAI)
+{
+    if (!HasHunterAmmoWeapon(player) || GetHunterAmmoCount(botAI) >= HunterAmmoRestockThreshold)
+        return false;
+
+    NewRpgStatus status = botAI->rpgInfo.GetStatus();
+    return status == RPG_GO_CAMP || status == RPG_WANDER_NPC;
+}
+
+void ClearStaleGrindTarget(Player* player, PlayerbotAI* botAI)
+{
+    if (player->IsInCombat())
+        return;
+
+    auto* currentTarget = botAI->GetAiObjectContext()->GetValue<Unit*>("current target");
+    if (!currentTarget || !currentTarget->Get())
+        return;
+
+    player->AttackStop();
+    player->SetSelection(ObjectGuid::Empty);
+    currentTarget->Set(nullptr);
+    botAI->ChangeEngine(BOT_STATE_NON_COMBAT);
+}
+
+void UpdateHunterAmmoTripStrategy(Player* player, PlayerbotAI* botAI)
+{
+    ObjectGuid guid = player->GetGUID();
+    bool suppressed = HunterAmmoTripsWithSuppressedGrind.contains(guid);
+
+    if (!IsHunterAmmoTrip(player, botAI))
+    {
+        if (suppressed)
+        {
+            botAI->ChangeStrategy("+grind", BOT_STATE_NON_COMBAT);
+            HunterAmmoTripsWithSuppressedGrind.erase(guid);
+            LOG_INFO("server.loading", "StrictAltbotGuild: {} restored grinding after hunter ammo trip", player->GetName());
+        }
+        return;
+    }
+
+    if (!suppressed && botAI->HasStrategy("grind", BOT_STATE_NON_COMBAT))
+    {
+        botAI->ChangeStrategy("-grind", BOT_STATE_NON_COMBAT);
+        HunterAmmoTripsWithSuppressedGrind.insert(guid);
+        LOG_INFO("server.loading", "StrictAltbotGuild: {} suspended grinding for hunter ammo trip", player->GetName());
+    }
+
+    ClearStaleGrindTarget(player, botAI);
+}
 }
 
 class StrictAltbotGuildWorldScript final : public WorldScript
@@ -66,6 +148,7 @@ public:
 
     void OnShutdown() override
     {
+        HunterAmmoTripsWithSuppressedGrind.clear();
         sStrictAltbotHolder->Shutdown();
     }
 };
@@ -142,6 +225,7 @@ public:
                 player->SetTaxiCheater(false);
             if (botAI->rpgInfo.GetStatus() == RPG_REST)
                 botAI->rpgInfo.ChangeToWanderRandom();
+            UpdateHunterAmmoTripStrategy(player, botAI);
             sStrictAltbotHolder->UpdateRpgServices(player);
             return;
         }
@@ -154,7 +238,10 @@ public:
     void OnPlayerLogout(Player* player) override
     {
         if (sStrictAltbotMgr->IsStrictAltbot(player->GetGUID().GetCounter()))
+        {
+            HunterAmmoTripsWithSuppressedGrind.erase(player->GetGUID());
             sStrictAltbotHolder->RemoveBot(player->GetGUID());
+        }
     }
 
 private:
