@@ -30,6 +30,7 @@
 namespace
 {
 constexpr float MaxVendorTripDistance = 5000.0f;
+constexpr uint32 HunterAmmoRestockThreshold = 200;
 
 std::unordered_map<ObjectGuid, WorldPosition> VendorTrips;
 std::unordered_map<ObjectGuid, uint32> LastServiceChecks;
@@ -68,6 +69,47 @@ bool NeedsToSell(PlayerbotAI* botAI)
         return false;
 
     return GetItemCountForUsage(botAI, ITEM_USAGE_VENDOR) + GetItemCountForUsage(botAI, ITEM_USAGE_AH) > 0;
+}
+
+uint32 GetHunterAmmoSubClass(Player* bot)
+{
+    if (!bot || bot->getClass() != CLASS_HUNTER)
+        return 0;
+
+    Item* rangedWeapon = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_RANGED);
+    if (!rangedWeapon || !rangedWeapon->GetTemplate())
+        return 0;
+
+    switch (rangedWeapon->GetTemplate()->SubClass)
+    {
+        case ITEM_SUBCLASS_WEAPON_GUN:
+            return ITEM_SUBCLASS_BULLET;
+        case ITEM_SUBCLASS_WEAPON_BOW:
+        case ITEM_SUBCLASS_WEAPON_CROSSBOW:
+            return ITEM_SUBCLASS_ARROW;
+        default:
+            return 0;
+    }
+}
+
+uint32 GetHunterAmmoCount(PlayerbotAI* botAI)
+{
+    if (Value<uint32>* value = botAI->GetAiObjectContext()->GetValue<uint32>("item count", "ammo"))
+        return value->Get();
+
+    return 0;
+}
+
+bool NeedsAmmo(Player* bot, PlayerbotAI* botAI)
+{
+    return GetHunterAmmoSubClass(bot) != 0 && GetHunterAmmoCount(botAI) < HunterAmmoRestockThreshold;
+}
+
+bool IsCompatibleHunterAmmo(Player* bot, ItemTemplate const* item)
+{
+    uint32 ammoSubClass = GetHunterAmmoSubClass(bot);
+    return ammoSubClass && item && item->Class == ITEM_CLASS_PROJECTILE && item->SubClass == ammoSubClass &&
+           bot->CanUseItem(item) == EQUIP_ERR_OK;
 }
 
 bool CanAffordRepair(PlayerbotAI* botAI)
@@ -133,6 +175,87 @@ std::optional<NeedMoneyFor> GetPurchaseBudget(ItemUsage usage)
     }
 }
 
+bool VendorHasAffordableAmmo(Player* bot, PlayerbotAI* botAI, Creature* npc)
+{
+    if (!npc || GetBagSpace(botAI) >= 100)
+        return false;
+
+    VendorItemData const* items = npc->GetVendorItems();
+    if (!items)
+        return false;
+
+    float discount = bot->GetReputationPriceDiscount(npc);
+    uint32 freeMoney = GetFreeMoney(botAI, NeedMoneyFor::ammo);
+
+    for (VendorItem const* vendorItem : items->m_items)
+    {
+        if (!vendorItem || vendorItem->ExtendedCost)
+            continue;
+
+        if (vendorItem->maxcount && !npc->GetVendorItemCurrentCount(vendorItem))
+            continue;
+
+        ItemTemplate const* item = sObjectMgr->GetItemTemplate(vendorItem->item);
+        if (!IsCompatibleHunterAmmo(bot, item))
+            continue;
+
+        uint32 price = static_cast<uint32>(std::floor(item->BuyPrice * discount));
+        if (freeMoney >= price)
+            return true;
+    }
+
+    return false;
+}
+
+bool BuyHunterAmmo(Player* bot, PlayerbotAI* botAI, Creature* npc)
+{
+    if (!VendorHasAffordableAmmo(bot, botAI, npc))
+        return false;
+
+    VendorItemData const* items = npc->GetVendorItems();
+    float discount = bot->GetReputationPriceDiscount(npc);
+    uint32 freeMoney = GetFreeMoney(botAI, NeedMoneyFor::ammo);
+
+    for (uint32 slot = 0; slot < items->GetItemCount(); ++slot)
+    {
+        VendorItem const* vendorItem = items->GetItem(slot);
+        if (!vendorItem || vendorItem->ExtendedCost)
+            continue;
+
+        ItemTemplate const* item = sObjectMgr->GetItemTemplate(vendorItem->item);
+        if (!IsCompatibleHunterAmmo(bot, item))
+            continue;
+
+        uint32 price = static_cast<uint32>(std::floor(item->BuyPrice * discount));
+        if (freeMoney < price)
+            continue;
+
+        bool boughtAny = false;
+        for (uint32 purchase = 0; purchase < 10 && freeMoney >= price; ++purchase)
+        {
+            if (vendorItem->maxcount && !npc->GetVendorItemCurrentCount(vendorItem))
+                break;
+
+            uint32 oldCount = bot->GetItemCount(item->ItemId, false);
+            bot->BuyItemFromVendorSlot(npc->GetGUID(), slot, item->ItemId, 1, NULL_BAG, NULL_SLOT);
+            if (bot->GetItemCount(item->ItemId, false) <= oldCount)
+                break;
+
+            boughtAny = true;
+            freeMoney -= price;
+        }
+
+        if (boughtAny)
+        {
+            LOG_INFO("server.loading", "StrictAltbotGuild: {} restocked hunter ammo at {}",
+                bot->GetName(), npc->GetName());
+            return true;
+        }
+    }
+
+    return false;
+}
+
 bool VendorHasUsefulAffordableItem(Player* bot, PlayerbotAI* botAI, Creature* npc)
 {
     if (GetBagSpace(botAI) >= 100)
@@ -185,8 +308,20 @@ Creature* FindNpc(Player* bot, GuidVector const& targets, Predicate&& predicate)
     return nullptr;
 }
 
-Creature* ChooseServiceNpc(Player* bot, PlayerbotAI* botAI, GuidVector const& targets, bool needsSell)
+Creature* ChooseServiceNpc(Player* bot, PlayerbotAI* botAI, GuidVector const& targets, bool needsSell, bool needsAmmo)
 {
+    if (needsAmmo)
+    {
+        if (Creature* npc = FindNpc(bot, targets, [bot, botAI](Creature* candidate)
+            {
+                return candidate->HasNpcFlag(UNIT_NPC_FLAG_VENDOR) &&
+                       VendorHasAffordableAmmo(bot, botAI, candidate);
+            }))
+        {
+            return npc;
+        }
+    }
+
     if (needsSell)
     {
         // Every normal vendor can buy items, so the closest one is the right one.
@@ -238,6 +373,62 @@ std::optional<WorldPosition> FindNearestVendor(Player* bot)
 
         FactionTemplateEntry const* faction = sFactionTemplateStore.LookupEntry(creatureInfo->faction);
         if (!faction || Unit::GetFactionReactionTo(bot->GetFactionTemplateEntry(), faction) <= REP_UNFRIENDLY)
+            continue;
+
+        WorldPosition position(data.mapid, data.posX, data.posY, data.posZ, data.orientation);
+        float distance = bot->GetExactDist(position);
+        if (distance >= bestDistance)
+            continue;
+
+        bestDistance = distance;
+        bestPosition = position;
+    }
+
+    return bestPosition;
+}
+
+std::optional<WorldPosition> FindNearestAmmoVendor(Player* bot, PlayerbotAI* botAI)
+{
+    float bestDistance = MaxVendorTripDistance;
+    std::optional<WorldPosition> bestPosition;
+    uint32 freeMoney = GetFreeMoney(botAI, NeedMoneyFor::ammo);
+
+    for (auto const& [spawnId, data] : sObjectMgr->GetAllCreatureData())
+    {
+        if (data.mapid != bot->GetMapId() || !(data.phaseMask & bot->GetPhaseMask()))
+            continue;
+
+        CreatureTemplate const* creatureInfo = sObjectMgr->GetCreatureTemplate(data.id);
+        if (!creatureInfo)
+            continue;
+
+        uint32 npcFlags = data.npcflag ? data.npcflag : creatureInfo->npcflag;
+        if (!(npcFlags & UNIT_NPC_FLAG_VENDOR))
+            continue;
+
+        FactionTemplateEntry const* faction = sFactionTemplateStore.LookupEntry(creatureInfo->faction);
+        if (!faction || Unit::GetFactionReactionTo(bot->GetFactionTemplateEntry(), faction) <= REP_UNFRIENDLY)
+            continue;
+
+        VendorItemData const* items = sObjectMgr->GetNpcVendorItemList(data.id);
+        if (!items)
+            continue;
+
+        bool sellsAmmo = false;
+        for (VendorItem const* vendorItem : items->m_items)
+        {
+            if (!vendorItem || vendorItem->ExtendedCost)
+                continue;
+
+            ItemTemplate const* item = sObjectMgr->GetItemTemplate(vendorItem->item);
+            if (IsCompatibleHunterAmmo(bot, item) && freeMoney >= item->BuyPrice)
+            {
+                sellsAmmo = true;
+                break;
+            }
+        }
+
+        if (!sellsAmmo)
             continue;
 
         WorldPosition position(data.mapid, data.posX, data.posY, data.posZ, data.orientation);
@@ -486,7 +677,36 @@ void StrictAltbotHolder::EnableAutonomy(Player* bot)
 void StrictAltbotHolder::UpdateRpgServices(Player* bot)
 {
     PlayerbotAI* botAI = GET_PLAYERBOT_AI(bot);
-    if (!botAI || botAI->rpgInfo.GetStatus() != RPG_WANDER_NPC)
+    if (!botAI)
+        return;
+
+    bool needsAmmo = NeedsAmmo(bot, botAI);
+    NewRpgStatus status = botAI->rpgInfo.GetStatus();
+
+    if (needsAmmo && status != RPG_WANDER_NPC)
+    {
+        if (bot->IsInCombat())
+            return;
+
+        auto trip = VendorTrips.find(bot->GetGUID());
+        if (trip != VendorTrips.end())
+        {
+            if (status != RPG_GO_CAMP)
+                botAI->rpgInfo.ChangeToGoCamp(trip->second);
+            return;
+        }
+
+        if (std::optional<WorldPosition> vendorPosition = FindNearestAmmoVendor(bot, botAI))
+        {
+            VendorTrips[bot->GetGUID()] = *vendorPosition;
+            botAI->rpgInfo.ChangeToGoCamp(*vendorPosition);
+            LOG_INFO("server.loading", "StrictAltbotGuild: {} low on hunter ammo ({}), heading to an ammo vendor",
+                bot->GetName(), GetHunterAmmoCount(botAI));
+        }
+        return;
+    }
+
+    if (status != RPG_WANDER_NPC)
         return;
 
     uint32& lastCheck = LastServiceChecks[bot->GetGUID()];
@@ -501,14 +721,17 @@ void StrictAltbotHolder::UpdateRpgServices(Player* bot)
     bool needsSell = NeedsToSell(botAI);
     Value<GuidVector>* targetsValue = botAI->GetAiObjectContext()->GetValue<GuidVector>("possible new rpg targets");
     GuidVector targets = targetsValue ? targetsValue->Get() : GuidVector{};
-    Creature* serviceNpc = ChooseServiceNpc(bot, botAI, targets, needsSell);
+    Creature* serviceNpc = ChooseServiceNpc(bot, botAI, targets, needsSell, needsAmmo);
 
     if (!serviceNpc)
     {
         auto trip = VendorTrips.find(bot->GetGUID());
-        if (needsSell && trip == VendorTrips.end())
+        if ((needsSell || needsAmmo) && trip == VendorTrips.end())
         {
-            if (std::optional<WorldPosition> vendorPosition = FindNearestVendor(bot))
+            std::optional<WorldPosition> vendorPosition = needsAmmo
+                ? FindNearestAmmoVendor(bot, botAI)
+                : FindNearestVendor(bot);
+            if (vendorPosition)
             {
                 VendorTrips[bot->GetGUID()] = *vendorPosition;
                 botAI->rpgInfo.ChangeToGoCamp(*vendorPosition);
@@ -540,6 +763,9 @@ void StrictAltbotHolder::UpdateRpgServices(Player* bot)
 
     if (needsSell && serviceNpc->HasNpcFlag(UNIT_NPC_FLAG_VENDOR))
         botAI->DoSpecificAction("sell", Event("strict altbot rpg", "vendor"), true);
+
+    if (needsAmmo && serviceNpc->HasNpcFlag(UNIT_NPC_FLAG_VENDOR))
+        BuyHunterAmmo(bot, botAI, serviceNpc);
 
     if (serviceNpc->HasNpcFlag(UNIT_NPC_FLAG_REPAIR) && CanAffordRepair(botAI))
         botAI->DoSpecificAction("repair", Event("strict altbot rpg"), true);
