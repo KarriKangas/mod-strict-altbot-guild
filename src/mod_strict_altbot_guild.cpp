@@ -46,6 +46,20 @@ bool HasHunterAmmoWeapon(Player* player)
     }
 }
 
+void EnsureHunterAmmoSelected(Player* player, PlayerbotAI* botAI)
+{
+    if (!HasHunterAmmoWeapon(player) || player->GetUInt32Value(PLAYER_AMMO_ID) != 0)
+        return;
+
+    Item* ammo = botAI->FindAmmo();
+    if (!ammo)
+        return;
+
+    player->SetAmmo(ammo->GetEntry());
+    LOG_INFO("server.loading", "StrictAltbotGuild: {} selected hunter ammo {} from inventory",
+        player->GetName(), ammo->GetEntry());
+}
+
 bool IsHunterAmmoTrip(Player* player, PlayerbotAI* botAI)
 {
     if (!HasHunterAmmoWeapon(player) || GetHunterAmmoCount(botAI) >= HunterAmmoRestockThreshold)
@@ -225,6 +239,7 @@ public:
                 player->SetTaxiCheater(false);
             if (botAI->rpgInfo.GetStatus() == RPG_REST)
                 botAI->rpgInfo.ChangeToWanderRandom();
+            EnsureHunterAmmoSelected(player, botAI);
             UpdateHunterAmmoTripStrategy(player, botAI);
             sStrictAltbotHolder->UpdateRpgServices(player);
             return;
