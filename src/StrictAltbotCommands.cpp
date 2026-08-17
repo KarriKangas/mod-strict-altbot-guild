@@ -597,6 +597,10 @@ std::string BuildHistoryJson(uint32 lowGuid)
 
     std::vector<uint32> rewarded(player->getRewardedQuests().begin(), player->getRewardedQuests().end());
     std::sort(rewarded.begin(), rewarded.end());
+    QueryResult dropped = CharacterDatabase.Query(
+        "SELECT `quest_id` FROM `strict_altbot_quest_drops` "
+        "WHERE `character_guid` = {} ORDER BY `quest_id`",
+        lowGuid);
 
     std::ostringstream out;
     out << "{\"version\":1,\"guid\":" << lowGuid << ",\"completed\":[";
@@ -607,6 +611,21 @@ std::string BuildHistoryJson(uint32 lowGuid)
         Quest const* quest = sObjectMgr->GetQuestTemplate(rewarded[index]);
         out << "{\"id\":" << rewarded[index] << ",\"title\":\""
             << EscapeJson(quest ? quest->GetTitle() : "Unknown quest") << "\"}";
+    }
+    out << "],\"abandoned\":[";
+    bool firstDropped = true;
+    if (dropped)
+    {
+        do
+        {
+            uint32 questId = dropped->Fetch()[0].Get<uint32>();
+            if (!firstDropped)
+                out << ',';
+            firstDropped = false;
+            Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
+            out << "{\"id\":" << questId << ",\"title\":\""
+                << EscapeJson(quest ? quest->GetTitle() : "Unknown quest") << "\"}";
+        } while (dropped->NextRow());
     }
     out << "]}";
     return out.str();

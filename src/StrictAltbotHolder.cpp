@@ -306,6 +306,17 @@ void StrictAltbotHolder::RecordLevelUp(Player* bot, uint8 oldLevel)
     }
 }
 
+void StrictAltbotHolder::RecordQuestDrop(Player* bot, uint32 questId)
+{
+    if (!bot || !questId || !sStrictAltbotMgr->IsStrictAltbot(bot->GetGUID().GetCounter()))
+        return;
+
+    CharacterDatabase.Execute(
+        "INSERT IGNORE INTO `strict_altbot_quest_drops` (`character_guid`, `quest_id`) "
+        "VALUES ({}, {})",
+        bot->GetGUID().GetCounter(), questId);
+}
+
 void StrictAltbotHolder::Update(uint32 diff)
 {
     if (_shuttingDown || !sStrictAltbotMgr->IsEnabled())

@@ -77,6 +77,7 @@ public:
         "StrictAltbotGuildPlayerScript",
         {
             PLAYERHOOK_ON_LEVEL_CHANGED,
+            PLAYERHOOK_ON_QUEST_ABANDON,
             PLAYERHOOK_ON_UPDATE,
             PLAYERHOOK_ON_LOGOUT,
             PLAYERHOOK_CAN_PLAYER_USE_CHAT,
@@ -117,6 +118,11 @@ public:
     {
         if (player && sStrictAltbotMgr->IsStrictAltbot(player->GetGUID().GetCounter()))
             sStrictAltbotHolder->RecordLevelUp(player, oldLevel);
+    }
+
+    void OnPlayerQuestAbandon(Player* player, uint32 questId) override
+    {
+        sStrictAltbotHolder->RecordQuestDrop(player, questId);
     }
 
     void OnPlayerUpdate(Player* player, uint32 /*diff*/) override

@@ -66,3 +66,10 @@ CREATE TABLE IF NOT EXISTS `strict_altbot_levelups` (
     PRIMARY KEY (`character_guid`, `level`),
     KEY `idx_strict_altbot_levelups_time` (`level_up_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `strict_altbot_quest_drops` (
+    `character_guid` INT UNSIGNED NOT NULL,
+    `quest_id` INT UNSIGNED NOT NULL,
+    PRIMARY KEY (`character_guid`, `quest_id`),
+    KEY `idx_strict_altbot_quest_drops_quest` (`quest_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

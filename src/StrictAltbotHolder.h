@@ -15,6 +15,7 @@ public:
     void UpdateRpgServices(Player* bot);
     void RecordFirstLogin(Player* bot);
     void RecordLevelUp(Player* bot, uint8 oldLevel);
+    void RecordQuestDrop(Player* bot, uint32 questId);
     void RemoveBot(ObjectGuid guid);
     void QueueOnBotLogin(ObjectGuid guid, std::function<void(Player*)> callback);
     void Shutdown();
