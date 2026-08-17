@@ -635,7 +635,9 @@ std::string BuildBenchmarksJson()
 {
     QueryResult bots = CharacterDatabase.Query(
         "SELECT sa.`character_guid`, c.`name`, c.`race`, c.`class`, c.`level`, "
-        "UNIX_TIMESTAMP(sa.`first_login_at`), COALESCE(UNIX_TIMESTAMP(sa.`retired_at`), 0) "
+        "UNIX_TIMESTAMP(sa.`first_login_at`), COALESCE(UNIX_TIMESTAMP(sa.`retired_at`), 0), "
+        "(SELECT COUNT(*) FROM `character_queststatus_rewarded` cqr "
+        "WHERE cqr.`guid` = sa.`character_guid` AND cqr.`active` = 1) "
         "FROM `strict_altbots` sa "
         "INNER JOIN `characters` c ON c.`guid` = sa.`character_guid` "
         "WHERE sa.`first_login_at` IS NOT NULL "
@@ -658,7 +660,8 @@ std::string BuildBenchmarksJson()
                 << ",\"classId\":" << static_cast<uint32>(fields[3].Get<uint8>())
                 << ",\"level\":" << static_cast<uint32>(fields[4].Get<uint8>())
                 << ",\"firstLoginAt\":" << fields[5].Get<uint32>()
-                << ",\"retiredAt\":" << fields[6].Get<uint32>() << '}';
+                << ",\"retiredAt\":" << fields[6].Get<uint32>()
+                << ",\"questsCompletedAmount\":" << fields[7].Get<uint64>() << '}';
         } while (bots->NextRow());
     }
 
