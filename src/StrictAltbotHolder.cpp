@@ -60,6 +60,12 @@ struct QuestItemVendorMatch
     uint32 requiredCount = 0;
 };
 
+struct MissingQuestItem
+{
+    uint32 questId = 0;
+    uint32 requiredCount = 0;
+};
+
 std::unordered_map<ObjectGuid, ServiceTrip> ServiceTrips;
 std::unordered_set<ObjectGuid> ServiceTripsWithSuppressedGrind;
 std::unordered_map<ObjectGuid, uint32> LastServiceChecks;
@@ -209,14 +215,53 @@ bool IsQuestItemStillNeeded(Player* bot, ServiceTrip const& trip)
     return bot->GetItemCount(trip.itemId, false) < trip.requiredCount;
 }
 
+std::unordered_map<uint32, MissingQuestItem> GetMissingQuestItems(Player* bot)
+{
+    std::unordered_map<uint32, MissingQuestItem> missingItems;
+
+    for (uint8 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
+    {
+        uint32 questId = bot->GetQuestSlotQuestId(slot);
+        if (!questId || bot->GetQuestStatus(questId) != QUEST_STATUS_INCOMPLETE)
+            continue;
+
+        Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
+        if (!quest)
+            continue;
+
+        for (uint32 objective = 0; objective < QUEST_ITEM_OBJECTIVES_COUNT; ++objective)
+        {
+            uint32 itemId = quest->RequiredItemId[objective];
+            uint32 requiredCount = quest->RequiredItemCount[objective];
+            if (!itemId || !requiredCount || bot->GetItemCount(itemId, false) >= requiredCount)
+                continue;
+
+            auto [it, inserted] = missingItems.try_emplace(itemId, MissingQuestItem{questId, requiredCount});
+            if (!inserted && requiredCount > it->second.requiredCount)
+                it->second = MissingQuestItem{questId, requiredCount};
+        }
+    }
+
+    return missingItems;
+}
+
+uint32 GetQuestItemCheckOffset(ObjectGuid guid)
+{
+    return static_cast<uint32>(
+        (static_cast<uint64>(guid.GetCounter()) * 2654435761ULL) % QuestItemCheckIntervalMs);
+}
+
 std::optional<QuestItemVendorMatch> FindNearbyQuestItemVendor(
     Player* bot, PlayerbotAI* botAI, GuidVector const& targets)
 {
     if (GetBagSpace(botAI) >= 100)
         return std::nullopt;
 
+    std::unordered_map<uint32, MissingQuestItem> missingItems = GetMissingQuestItems(bot);
+    if (missingItems.empty())
+        return std::nullopt;
+
     uint32 freeMoney = GetFreeMoney(botAI, NeedMoneyFor::anything);
-    QuestStatusMap const& questStatusMap = bot->getQuestStatusMap();
 
     for (ObjectGuid const& guid : targets)
     {
@@ -230,41 +275,28 @@ std::optional<QuestItemVendorMatch> FindNearbyQuestItemVendor(
 
         float discount = bot->GetReputationPriceDiscount(npc);
 
-        for (auto const& [questId, statusData] : questStatusMap)
+        for (VendorItem const* vendorItem : items->m_items)
         {
-            if (statusData.Status != QUEST_STATUS_INCOMPLETE)
+            if (!vendorItem || vendorItem->ExtendedCost)
                 continue;
 
-            Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
-            if (!quest)
+            auto missing = missingItems.find(vendorItem->item);
+            if (missing == missingItems.end())
                 continue;
 
-            for (uint32 objective = 0; objective < QUEST_ITEM_OBJECTIVES_COUNT; ++objective)
-            {
-                uint32 itemId = quest->RequiredItemId[objective];
-                uint32 requiredCount = quest->RequiredItemCount[objective];
-                if (!itemId || !requiredCount || statusData.ItemCount[objective] >= requiredCount)
-                    continue;
+            if (vendorItem->maxcount && !npc->GetVendorItemCurrentCount(vendorItem))
+                continue;
 
-                for (VendorItem const* vendorItem : items->m_items)
-                {
-                    if (!vendorItem || vendorItem->ExtendedCost || vendorItem->item != itemId)
-                        continue;
+            ItemTemplate const* item = sObjectMgr->GetItemTemplate(vendorItem->item);
+            if (!item)
+                continue;
 
-                    if (vendorItem->maxcount && !npc->GetVendorItemCurrentCount(vendorItem))
-                        continue;
+            uint32 price = static_cast<uint32>(std::floor(item->BuyPrice * discount));
+            if (freeMoney < price)
+                continue;
 
-                    ItemTemplate const* item = sObjectMgr->GetItemTemplate(itemId);
-                    if (!item)
-                        continue;
-
-                    uint32 price = static_cast<uint32>(std::floor(item->BuyPrice * discount));
-                    if (freeMoney < price)
-                        continue;
-
-                    return QuestItemVendorMatch{npc, questId, itemId, requiredCount};
-                }
-            }
+            return QuestItemVendorMatch{
+                npc, missing->second.questId, vendorItem->item, missing->second.requiredCount};
         }
     }
 
@@ -934,8 +966,12 @@ void StrictAltbotHolder::UpdateRpgServices(Player* bot)
     if (!ServiceTrips.contains(guid) && !needsAmmo && !needsSell && bot->IsAlive() && !bot->IsInCombat() &&
         !bot->IsInFlight() && !bot->IsBeingTeleported())
     {
-        uint32& lastCheck = LastQuestItemChecks[guid];
-        if (!lastCheck || GetMSTimeDiffToNow(lastCheck) >= QuestItemCheckIntervalMs)
+        auto [checkIt, inserted] = LastQuestItemChecks.try_emplace(guid);
+        if (inserted)
+            checkIt->second = getMSTime() - GetQuestItemCheckOffset(guid);
+
+        uint32& lastCheck = checkIt->second;
+        if (GetMSTimeDiffToNow(lastCheck) >= QuestItemCheckIntervalMs)
         {
             lastCheck = getMSTime();
 
