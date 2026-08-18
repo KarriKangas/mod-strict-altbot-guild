@@ -63,12 +63,14 @@ uint32 GetItemCountForUsage(PlayerbotAI* botAI, ItemUsage usage)
     return 0;
 }
 
+bool HasSellableItems(PlayerbotAI* botAI)
+{
+    return GetItemCountForUsage(botAI, ITEM_USAGE_VENDOR) + GetItemCountForUsage(botAI, ITEM_USAGE_AH) > 0;
+}
+
 bool NeedsToSell(PlayerbotAI* botAI)
 {
-    if (GetBagSpace(botAI) <= 80)
-        return false;
-
-    return GetItemCountForUsage(botAI, ITEM_USAGE_VENDOR) + GetItemCountForUsage(botAI, ITEM_USAGE_AH) > 0;
+    return GetBagSpace(botAI) > 80 && HasSellableItems(botAI);
 }
 
 uint32 GetHunterAmmoSubClass(Player* bot)
@@ -173,6 +175,30 @@ std::optional<NeedMoneyFor> GetPurchaseBudget(ItemUsage usage)
         default:
             return std::nullopt;
     }
+}
+
+bool VendorHasCompatibleAmmo(Player* bot, Creature* npc)
+{
+    if (!npc)
+        return false;
+
+    VendorItemData const* items = npc->GetVendorItems();
+    if (!items)
+        return false;
+
+    for (VendorItem const* vendorItem : items->m_items)
+    {
+        if (!vendorItem || vendorItem->ExtendedCost)
+            continue;
+
+        if (vendorItem->maxcount && !npc->GetVendorItemCurrentCount(vendorItem))
+            continue;
+
+        if (IsCompatibleHunterAmmo(bot, sObjectMgr->GetItemTemplate(vendorItem->item)))
+            return true;
+    }
+
+    return false;
 }
 
 bool VendorHasAffordableAmmo(Player* bot, PlayerbotAI* botAI, Creature* npc)
@@ -312,10 +338,9 @@ Creature* ChooseServiceNpc(Player* bot, PlayerbotAI* botAI, GuidVector const& ta
 {
     if (needsAmmo)
     {
-        if (Creature* npc = FindNpc(bot, targets, [bot, botAI](Creature* candidate)
+        if (Creature* npc = FindNpc(bot, targets, [bot](Creature* candidate)
             {
-                return candidate->HasNpcFlag(UNIT_NPC_FLAG_VENDOR) &&
-                       VendorHasAffordableAmmo(bot, botAI, candidate);
+                return candidate->HasNpcFlag(UNIT_NPC_FLAG_VENDOR) && VendorHasCompatibleAmmo(bot, candidate);
             }))
         {
             return npc;
@@ -387,11 +412,10 @@ std::optional<WorldPosition> FindNearestVendor(Player* bot)
     return bestPosition;
 }
 
-std::optional<WorldPosition> FindNearestAmmoVendor(Player* bot, PlayerbotAI* botAI)
+std::optional<WorldPosition> FindNearestAmmoVendor(Player* bot)
 {
     float bestDistance = MaxVendorTripDistance;
     std::optional<WorldPosition> bestPosition;
-    uint32 freeMoney = GetFreeMoney(botAI, NeedMoneyFor::ammo);
 
     for (auto const& [spawnId, data] : sObjectMgr->GetAllCreatureData())
     {
@@ -421,7 +445,7 @@ std::optional<WorldPosition> FindNearestAmmoVendor(Player* bot, PlayerbotAI* bot
                 continue;
 
             ItemTemplate const* item = sObjectMgr->GetItemTemplate(vendorItem->item);
-            if (IsCompatibleHunterAmmo(bot, item) && freeMoney >= item->BuyPrice)
+            if (IsCompatibleHunterAmmo(bot, item))
             {
                 sellsAmmo = true;
                 break;
@@ -696,7 +720,7 @@ void StrictAltbotHolder::UpdateRpgServices(Player* bot)
             return;
         }
 
-        if (std::optional<WorldPosition> vendorPosition = FindNearestAmmoVendor(bot, botAI))
+        if (std::optional<WorldPosition> vendorPosition = FindNearestAmmoVendor(bot))
         {
             VendorTrips[bot->GetGUID()] = *vendorPosition;
             botAI->rpgInfo.ChangeToGoCamp(*vendorPosition);
@@ -729,7 +753,7 @@ void StrictAltbotHolder::UpdateRpgServices(Player* bot)
         if ((needsSell || needsAmmo) && trip == VendorTrips.end())
         {
             std::optional<WorldPosition> vendorPosition = needsAmmo
-                ? FindNearestAmmoVendor(bot, botAI)
+                ? FindNearestAmmoVendor(bot)
                 : FindNearestVendor(bot);
             if (vendorPosition)
             {
@@ -761,7 +785,7 @@ void StrictAltbotHolder::UpdateRpgServices(Player* bot)
     bot->SetTarget(serviceNpc->GetGUID());
     bot->SetFacingToObject(serviceNpc);
 
-    if (needsSell && serviceNpc->HasNpcFlag(UNIT_NPC_FLAG_VENDOR))
+    if ((needsSell || (needsAmmo && HasSellableItems(botAI))) && serviceNpc->HasNpcFlag(UNIT_NPC_FLAG_VENDOR))
         botAI->DoSpecificAction("sell", Event("strict altbot rpg", "vendor"), true);
 
     if (needsAmmo && serviceNpc->HasNpcFlag(UNIT_NPC_FLAG_VENDOR))
