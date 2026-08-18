@@ -26,13 +26,27 @@
 #include <cmath>
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace
 {
 constexpr float MaxVendorTripDistance = 5000.0f;
 constexpr uint32 HunterAmmoRestockThreshold = 200;
 
-std::unordered_map<ObjectGuid, WorldPosition> VendorTrips;
+enum class ServiceTripKind
+{
+    Sell,
+    Ammo
+};
+
+struct ServiceTrip
+{
+    ServiceTripKind kind;
+    WorldPosition destination;
+};
+
+std::unordered_map<ObjectGuid, ServiceTrip> ServiceTrips;
+std::unordered_set<ObjectGuid> ServiceTripsWithSuppressedGrind;
 std::unordered_map<ObjectGuid, uint32> LastServiceChecks;
 
 uint8 GetBagSpace(PlayerbotAI* botAI)
@@ -105,6 +119,47 @@ uint32 GetHunterAmmoCount(PlayerbotAI* botAI)
 bool NeedsAmmo(Player* bot, PlayerbotAI* botAI)
 {
     return GetHunterAmmoSubClass(bot) != 0 && GetHunterAmmoCount(botAI) < HunterAmmoRestockThreshold;
+}
+
+void ClearStaleGrindTarget(Player* player, PlayerbotAI* botAI)
+{
+    if (player->IsInCombat())
+        return;
+
+    auto* currentTarget = botAI->GetAiObjectContext()->GetValue<Unit*>("current target");
+    if (!currentTarget || !currentTarget->Get())
+        return;
+
+    player->AttackStop();
+    player->SetSelection(ObjectGuid::Empty);
+    currentTarget->Set(nullptr);
+    botAI->ChangeEngine(BOT_STATE_NON_COMBAT);
+}
+
+void UpdateServiceTripStrategy(Player* player, PlayerbotAI* botAI)
+{
+    ObjectGuid guid = player->GetGUID();
+    bool suppressed = ServiceTripsWithSuppressedGrind.contains(guid);
+
+    if (!ServiceTrips.contains(guid))
+    {
+        if (suppressed)
+        {
+            botAI->ChangeStrategy("+grind", BOT_STATE_NON_COMBAT);
+            ServiceTripsWithSuppressedGrind.erase(guid);
+            LOG_INFO("server.loading", "StrictAltbotGuild: {} restored grinding after service trip", player->GetName());
+        }
+        return;
+    }
+
+    if (!suppressed && botAI->HasStrategy("grind", BOT_STATE_NON_COMBAT))
+    {
+        botAI->ChangeStrategy("-grind", BOT_STATE_NON_COMBAT);
+        ServiceTripsWithSuppressedGrind.insert(guid);
+        LOG_INFO("server.loading", "StrictAltbotGuild: {} suspended grinding for service trip", player->GetName());
+    }
+
+    ClearStaleGrindTarget(player, botAI);
 }
 
 bool IsCompatibleHunterAmmo(Player* bot, ItemTemplate const* item)
@@ -704,7 +759,19 @@ void StrictAltbotHolder::UpdateRpgServices(Player* bot)
     if (!botAI)
         return;
 
+    ObjectGuid guid = bot->GetGUID();
     bool needsAmmo = NeedsAmmo(bot, botAI);
+    bool needsSell = NeedsToSell(botAI);
+
+    if (auto trip = ServiceTrips.find(guid); trip != ServiceTrips.end())
+    {
+        bool stillNeeded = trip->second.kind == ServiceTripKind::Ammo ? needsAmmo : needsSell;
+        if (!stillNeeded)
+            ServiceTrips.erase(trip);
+    }
+
+    UpdateServiceTripStrategy(bot, botAI);
+
     NewRpgStatus status = botAI->rpgInfo.GetStatus();
 
     if (needsAmmo && status != RPG_WANDER_NPC)
@@ -712,17 +779,17 @@ void StrictAltbotHolder::UpdateRpgServices(Player* bot)
         if (bot->IsInCombat())
             return;
 
-        auto trip = VendorTrips.find(bot->GetGUID());
-        if (trip != VendorTrips.end())
+        auto trip = ServiceTrips.find(guid);
+        if (trip != ServiceTrips.end())
         {
             if (status != RPG_GO_CAMP)
-                botAI->rpgInfo.ChangeToGoCamp(trip->second);
+                botAI->rpgInfo.ChangeToGoCamp(trip->second.destination);
             return;
         }
 
         if (std::optional<WorldPosition> vendorPosition = FindNearestAmmoVendor(bot))
         {
-            VendorTrips[bot->GetGUID()] = *vendorPosition;
+            ServiceTrips[guid] = ServiceTrip{ServiceTripKind::Ammo, *vendorPosition};
             botAI->rpgInfo.ChangeToGoCamp(*vendorPosition);
             LOG_INFO("server.loading", "StrictAltbotGuild: {} low on hunter ammo ({}), heading to an ammo vendor",
                 bot->GetName(), GetHunterAmmoCount(botAI));
@@ -733,7 +800,7 @@ void StrictAltbotHolder::UpdateRpgServices(Player* bot)
     if (status != RPG_WANDER_NPC)
         return;
 
-    uint32& lastCheck = LastServiceChecks[bot->GetGUID()];
+    uint32& lastCheck = LastServiceChecks[guid];
     if (lastCheck && GetMSTimeDiffToNow(lastCheck) < 1000)
         return;
     lastCheck = getMSTime();
@@ -742,36 +809,34 @@ void StrictAltbotHolder::UpdateRpgServices(Player* bot)
     if (!wander)
         return;
 
-    bool needsSell = NeedsToSell(botAI);
     Value<GuidVector>* targetsValue = botAI->GetAiObjectContext()->GetValue<GuidVector>("possible new rpg targets");
     GuidVector targets = targetsValue ? targetsValue->Get() : GuidVector{};
     Creature* serviceNpc = ChooseServiceNpc(bot, botAI, targets, needsSell, needsAmmo);
 
     if (!serviceNpc)
     {
-        auto trip = VendorTrips.find(bot->GetGUID());
-        if ((needsSell || needsAmmo) && trip == VendorTrips.end())
+        auto trip = ServiceTrips.find(guid);
+        if ((needsSell || needsAmmo) && trip == ServiceTrips.end())
         {
             std::optional<WorldPosition> vendorPosition = needsAmmo
                 ? FindNearestAmmoVendor(bot)
                 : FindNearestVendor(bot);
             if (vendorPosition)
             {
-                VendorTrips[bot->GetGUID()] = *vendorPosition;
+                ServiceTripKind kind = needsAmmo ? ServiceTripKind::Ammo : ServiceTripKind::Sell;
+                ServiceTrips[guid] = ServiceTrip{kind, *vendorPosition};
                 botAI->rpgInfo.ChangeToGoCamp(*vendorPosition);
                 return;
             }
         }
 
         // A remembered trip reaching an empty/disabled spawn should not loop forever.
-        if (trip != VendorTrips.end())
-            VendorTrips.erase(trip);
+        if (trip != ServiceTrips.end())
+            ServiceTrips.erase(trip);
 
         botAI->rpgInfo.ChangeToIdle();
         return;
     }
-
-    VendorTrips.erase(bot->GetGUID());
 
     if (wander->npcOrGo != serviceNpc->GetGUID())
     {
@@ -800,12 +865,14 @@ void StrictAltbotHolder::UpdateRpgServices(Player* bot)
     if (serviceNpc->HasNpcFlag(UNIT_NPC_FLAG_VENDOR) && VendorHasUsefulAffordableItem(bot, botAI, serviceNpc))
         botAI->DoSpecificAction("buy", Event("strict altbot rpg", "vendor"), true);
 
+    ServiceTrips.erase(guid);
     botAI->rpgInfo.ChangeToIdle();
 }
 
 void StrictAltbotHolder::RemoveBot(ObjectGuid guid)
 {
-    VendorTrips.erase(guid);
+    ServiceTrips.erase(guid);
+    ServiceTripsWithSuppressedGrind.erase(guid);
     LastServiceChecks.erase(guid);
     _loginCallbacks.erase(guid);
     RemoveFromPlayerbotsMap(guid);
@@ -816,7 +883,8 @@ void StrictAltbotHolder::Shutdown()
     _shuttingDown = true;
     _loading.clear();
     _loginCallbacks.clear();
-    VendorTrips.clear();
+    ServiceTrips.clear();
+    ServiceTripsWithSuppressedGrind.clear();
     LastServiceChecks.clear();
     LogoutAllBots();
 }
