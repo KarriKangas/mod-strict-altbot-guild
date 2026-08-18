@@ -145,7 +145,7 @@ bool NeedsAmmo(Player* bot, PlayerbotAI* botAI)
     if (GetHunterAmmoSubClass(bot) == 0 || GetHunterAmmoCount(botAI) >= HunterAmmoRestockThreshold)
         return false;
 
-    return GetFreeMoney(botAI, NeedMoneyFor::ammo) > 0 || HasSellableItems(botAI);
+    return bot->GetMoney() > 0 || HasSellableItems(botAI);
 }
 
 bool CanRetryAmmoTrip(ObjectGuid guid)
@@ -457,7 +457,7 @@ bool VendorHasAffordableAmmo(Player* bot, PlayerbotAI* botAI, Creature* npc)
         return false;
 
     float discount = bot->GetReputationPriceDiscount(npc);
-    uint32 freeMoney = GetFreeMoney(botAI, NeedMoneyFor::ammo);
+    uint32 money = bot->GetMoney();
 
     for (VendorItem const* vendorItem : items->m_items)
     {
@@ -472,7 +472,7 @@ bool VendorHasAffordableAmmo(Player* bot, PlayerbotAI* botAI, Creature* npc)
             continue;
 
         uint32 price = static_cast<uint32>(std::floor(item->BuyPrice * discount));
-        if (freeMoney >= price)
+        if (money >= price)
             return true;
     }
 
@@ -486,7 +486,7 @@ bool BuyHunterAmmo(Player* bot, PlayerbotAI* botAI, Creature* npc)
 
     VendorItemData const* items = npc->GetVendorItems();
     float discount = bot->GetReputationPriceDiscount(npc);
-    uint32 freeMoney = GetFreeMoney(botAI, NeedMoneyFor::ammo);
+    uint32 money = bot->GetMoney();
 
     for (uint32 slot = 0; slot < items->GetItemCount(); ++slot)
     {
@@ -499,11 +499,11 @@ bool BuyHunterAmmo(Player* bot, PlayerbotAI* botAI, Creature* npc)
             continue;
 
         uint32 price = static_cast<uint32>(std::floor(item->BuyPrice * discount));
-        if (freeMoney < price)
+        if (money < price)
             continue;
 
         bool boughtAny = false;
-        for (uint32 purchase = 0; purchase < 10 && freeMoney >= price; ++purchase)
+        for (uint32 purchase = 0; purchase < 10 && money >= price; ++purchase)
         {
             if (vendorItem->maxcount && !npc->GetVendorItemCurrentCount(vendorItem))
                 break;
@@ -514,7 +514,7 @@ bool BuyHunterAmmo(Player* bot, PlayerbotAI* botAI, Creature* npc)
                 break;
 
             boughtAny = true;
-            freeMoney -= price;
+            money -= price;
         }
 
         if (boughtAny)
@@ -660,9 +660,9 @@ std::optional<WorldPosition> FindNearestVendor(Player* bot)
 
 std::optional<WorldPosition> FindNearestAmmoVendor(Player* bot, PlayerbotAI* botAI)
 {
-    uint32 freeMoney = GetFreeMoney(botAI, NeedMoneyFor::ammo);
+    uint32 money = bot->GetMoney();
     bool canSell = HasSellableItems(botAI);
-    if (!freeMoney && !canSell)
+    if (!money && !canSell)
         return std::nullopt;
 
     float bestDistance = MaxVendorTripDistance;
@@ -696,7 +696,7 @@ std::optional<WorldPosition> FindNearestAmmoVendor(Player* bot, PlayerbotAI* bot
                 continue;
 
             ItemTemplate const* item = sObjectMgr->GetItemTemplate(vendorItem->item);
-            if (IsCompatibleHunterAmmo(bot, item) && (canSell || freeMoney >= item->BuyPrice))
+            if (IsCompatibleHunterAmmo(bot, item) && (canSell || money >= item->BuyPrice))
             {
                 sellsAffordableAmmo = true;
                 break;
@@ -1150,9 +1150,9 @@ void StrictAltbotHolder::UpdateRpgServices(Player* bot)
     {
         LastFailedAmmoTrips[guid] = getMSTime();
         LOG_INFO("server.loading",
-            "StrictAltbotGuild: {} could not restock hunter ammo at {} ({} ammo, {} copper available); retrying in {} seconds",
+            "StrictAltbotGuild: {} could not restock hunter ammo at {} ({} ammo, {} copper in wallet); retrying in {} seconds",
             bot->GetName(), serviceNpc->GetName(), GetHunterAmmoCount(botAI),
-            GetFreeMoney(botAI, NeedMoneyFor::ammo), FailedAmmoTripRetryMs / 1000);
+            bot->GetMoney(), FailedAmmoTripRetryMs / 1000);
         ServiceTrips.erase(guid);
         botAI->rpgInfo.ChangeToIdle();
         return;
