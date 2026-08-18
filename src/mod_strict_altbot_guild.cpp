@@ -4,6 +4,7 @@
 #include "Player.h"
 #include "PlayerbotAI.h"
 #include "PlayerbotAIConfig.h"
+#include "PlayerbotGuildMgr.h"
 #include "Playerbots.h"
 #include "ScriptMgr.h"
 #include "StrictAltbotHolder.h"
@@ -21,6 +22,7 @@ constexpr uint32 GearDirtyStaggerBuckets = 30;
 constexpr uint32 GearDirtyStaggerStepMs = 100;
 
 uint32 NormalBotCheatMask = 0;
+bool PlayerbotGuildCacheRefreshPending = false;
 
 struct GearReconcileState
 {
@@ -183,11 +185,19 @@ public:
 
     void OnUpdate(uint32 diff) override
     {
+        if (PlayerbotGuildCacheRefreshPending)
+        {
+            PlayerbotGuildMgr::instance().ValidateGuildCache();
+            PlayerbotGuildCacheRefreshPending = false;
+            LOG_INFO("server.loading", "StrictAltbotGuild: refreshed Playerbots guild cache after strict guild creation");
+        }
+
         sStrictAltbotHolder->Update(diff);
     }
 
     void OnShutdown() override
     {
+        PlayerbotGuildCacheRefreshPending = false;
         GearReconcileStates.clear();
         sStrictAltbotHolder->Shutdown();
     }
@@ -308,9 +318,31 @@ private:
     }
 };
 
+class StrictAltbotGuildCacheScript final : public GuildScript
+{
+public:
+    StrictAltbotGuildCacheScript() : GuildScript(
+        "StrictAltbotGuildCacheScript",
+        {
+            GUILDHOOK_ON_CREATE
+        })
+    {
+    }
+
+    void OnCreate(Guild* /*guild*/, Player* leader, std::string const& /*name*/) override
+    {
+        if (!sStrictAltbotMgr->IsEnabled() || !leader)
+            return;
+
+        if (sStrictAltbotMgr->IsStrictAltbot(leader->GetGUID().GetCounter()))
+            PlayerbotGuildCacheRefreshPending = true;
+    }
+};
+
 void Addmod_strict_altbot_guildScripts()
 {
     new StrictAltbotGuildWorldScript();
     new StrictAltbotGuildPlayerScript();
+    new StrictAltbotGuildCacheScript();
     AddSC_strict_altbot_commandscript();
 }
