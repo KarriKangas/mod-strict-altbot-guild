@@ -142,7 +142,10 @@ uint32 GetHunterAmmoCount(PlayerbotAI* botAI)
 
 bool NeedsAmmo(Player* bot, PlayerbotAI* botAI)
 {
-    return GetHunterAmmoSubClass(bot) != 0 && GetHunterAmmoCount(botAI) < HunterAmmoRestockThreshold;
+    if (GetHunterAmmoSubClass(bot) == 0 || GetHunterAmmoCount(botAI) >= HunterAmmoRestockThreshold)
+        return false;
+
+    return GetFreeMoney(botAI, NeedMoneyFor::ammo) > 0 || HasSellableItems(botAI);
 }
 
 bool CanRetryAmmoTrip(ObjectGuid guid)
@@ -658,7 +661,8 @@ std::optional<WorldPosition> FindNearestVendor(Player* bot)
 std::optional<WorldPosition> FindNearestAmmoVendor(Player* bot, PlayerbotAI* botAI)
 {
     uint32 freeMoney = GetFreeMoney(botAI, NeedMoneyFor::ammo);
-    if (!freeMoney)
+    bool canSell = HasSellableItems(botAI);
+    if (!freeMoney && !canSell)
         return std::nullopt;
 
     float bestDistance = MaxVendorTripDistance;
@@ -692,7 +696,7 @@ std::optional<WorldPosition> FindNearestAmmoVendor(Player* bot, PlayerbotAI* bot
                 continue;
 
             ItemTemplate const* item = sObjectMgr->GetItemTemplate(vendorItem->item);
-            if (IsCompatibleHunterAmmo(bot, item) && freeMoney >= item->BuyPrice)
+            if (IsCompatibleHunterAmmo(bot, item) && (canSell || freeMoney >= item->BuyPrice))
             {
                 sellsAffordableAmmo = true;
                 break;
