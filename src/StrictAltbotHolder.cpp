@@ -34,6 +34,7 @@ namespace
 constexpr float MaxVendorTripDistance = 5000.0f;
 constexpr uint32 HunterAmmoRestockThreshold = 200;
 constexpr uint32 QuestItemCheckIntervalMs = 5000;
+constexpr uint32 FailedAmmoTripRetryMs = 30000;
 
 enum class ServiceTripKind
 {
@@ -70,6 +71,7 @@ std::unordered_map<ObjectGuid, ServiceTrip> ServiceTrips;
 std::unordered_set<ObjectGuid> ServiceTripsWithSuppressedGrind;
 std::unordered_map<ObjectGuid, uint32> LastServiceChecks;
 std::unordered_map<ObjectGuid, uint32> LastQuestItemChecks;
+std::unordered_map<ObjectGuid, uint32> LastFailedAmmoTrips;
 
 uint8 GetBagSpace(PlayerbotAI* botAI)
 {
@@ -140,7 +142,17 @@ uint32 GetHunterAmmoCount(PlayerbotAI* botAI)
 
 bool NeedsAmmo(Player* bot, PlayerbotAI* botAI)
 {
-    return GetHunterAmmoSubClass(bot) != 0 && GetHunterAmmoCount(botAI) < HunterAmmoRestockThreshold;
+    if (GetHunterAmmoSubClass(bot) == 0 || GetHunterAmmoCount(botAI) >= HunterAmmoRestockThreshold)
+        return false;
+
+    return GetFreeMoney(botAI, NeedMoneyFor::ammo) > 0 || HasSellableItems(botAI);
+}
+
+bool CanRetryAmmoTrip(ObjectGuid guid)
+{
+    auto failed = LastFailedAmmoTrips.find(guid);
+    return failed == LastFailedAmmoTrips.end() ||
+           GetMSTimeDiffToNow(failed->second) >= FailedAmmoTripRetryMs;
 }
 
 void ClearStaleGrindTarget(Player* player, PlayerbotAI* botAI)
@@ -646,8 +658,13 @@ std::optional<WorldPosition> FindNearestVendor(Player* bot)
     return bestPosition;
 }
 
-std::optional<WorldPosition> FindNearestAmmoVendor(Player* bot)
+std::optional<WorldPosition> FindNearestAmmoVendor(Player* bot, PlayerbotAI* botAI)
 {
+    uint32 freeMoney = GetFreeMoney(botAI, NeedMoneyFor::ammo);
+    bool canSell = HasSellableItems(botAI);
+    if (!freeMoney && !canSell)
+        return std::nullopt;
+
     float bestDistance = MaxVendorTripDistance;
     std::optional<WorldPosition> bestPosition;
 
@@ -672,21 +689,21 @@ std::optional<WorldPosition> FindNearestAmmoVendor(Player* bot)
         if (!items)
             continue;
 
-        bool sellsAmmo = false;
+        bool sellsAffordableAmmo = false;
         for (VendorItem const* vendorItem : items->m_items)
         {
             if (!vendorItem || vendorItem->ExtendedCost)
                 continue;
 
             ItemTemplate const* item = sObjectMgr->GetItemTemplate(vendorItem->item);
-            if (IsCompatibleHunterAmmo(bot, item))
+            if (IsCompatibleHunterAmmo(bot, item) && (canSell || freeMoney >= item->BuyPrice))
             {
-                sellsAmmo = true;
+                sellsAffordableAmmo = true;
                 break;
             }
         }
 
-        if (!sellsAmmo)
+        if (!sellsAffordableAmmo)
             continue;
 
         WorldPosition position(data.mapid, data.posX, data.posY, data.posZ, data.orientation);
@@ -942,6 +959,9 @@ void StrictAltbotHolder::UpdateRpgServices(Player* bot)
     bool needsAmmo = NeedsAmmo(bot, botAI);
     bool needsSell = NeedsToSell(botAI);
 
+    if (!needsAmmo)
+        LastFailedAmmoTrips.erase(guid);
+
     if (auto trip = ServiceTrips.find(guid); trip != ServiceTrips.end())
     {
         bool stillNeeded = false;
@@ -1013,7 +1033,10 @@ void StrictAltbotHolder::UpdateRpgServices(Player* bot)
             return;
         }
 
-        if (std::optional<WorldPosition> vendorPosition = FindNearestAmmoVendor(bot))
+        if (!CanRetryAmmoTrip(guid))
+            return;
+
+        if (std::optional<WorldPosition> vendorPosition = FindNearestAmmoVendor(bot, botAI))
         {
             ServiceTrips[guid] = ServiceTrip{ServiceTripKind::Ammo, *vendorPosition};
             botAI->rpgInfo.ChangeToGoCamp(*vendorPosition);
@@ -1055,21 +1078,38 @@ void StrictAltbotHolder::UpdateRpgServices(Player* bot)
     {
         if ((needsSell || needsAmmo) && trip == ServiceTrips.end())
         {
-            std::optional<WorldPosition> vendorPosition = needsAmmo
-                ? FindNearestAmmoVendor(bot)
-                : FindNearestVendor(bot);
+            std::optional<WorldPosition> vendorPosition;
+            ServiceTripKind kind = ServiceTripKind::Sell;
+
+            if (needsAmmo && CanRetryAmmoTrip(guid))
+            {
+                vendorPosition = FindNearestAmmoVendor(bot, botAI);
+                kind = ServiceTripKind::Ammo;
+            }
+            else if (needsSell)
+            {
+                vendorPosition = FindNearestVendor(bot);
+            }
+
             if (vendorPosition)
             {
-                ServiceTripKind kind = needsAmmo ? ServiceTripKind::Ammo : ServiceTripKind::Sell;
                 ServiceTrips[guid] = ServiceTrip{kind, *vendorPosition};
                 botAI->rpgInfo.ChangeToGoCamp(*vendorPosition);
                 return;
             }
         }
 
-        // A remembered trip reaching an empty/disabled spawn should not loop forever.
         if (trip != ServiceTrips.end())
+        {
+            if (trip->second.kind == ServiceTripKind::Ammo)
+            {
+                LastFailedAmmoTrips[guid] = getMSTime();
+                LOG_INFO("server.loading",
+                    "StrictAltbotGuild: {} could not find a usable ammo vendor on arrival; retrying in {} seconds",
+                    bot->GetName(), FailedAmmoTripRetryMs / 1000);
+            }
             ServiceTrips.erase(trip);
+        }
 
         botAI->rpgInfo.ChangeToIdle();
         return;
@@ -1098,8 +1138,25 @@ void StrictAltbotHolder::UpdateRpgServices(Player* bot)
     if ((needsSell || (needsAmmo && HasSellableItems(botAI))) && serviceNpc->HasNpcFlag(UNIT_NPC_FLAG_VENDOR))
         botAI->DoSpecificAction("sell", Event("strict altbot rpg", "vendor"), true);
 
+    bool boughtAmmo = false;
     if (needsAmmo && serviceNpc->HasNpcFlag(UNIT_NPC_FLAG_VENDOR))
-        BuyHunterAmmo(bot, botAI, serviceNpc);
+    {
+        boughtAmmo = BuyHunterAmmo(bot, botAI, serviceNpc);
+        if (boughtAmmo)
+            LastFailedAmmoTrips.erase(guid);
+    }
+
+    if (trip != ServiceTrips.end() && trip->second.kind == ServiceTripKind::Ammo && needsAmmo && !boughtAmmo)
+    {
+        LastFailedAmmoTrips[guid] = getMSTime();
+        LOG_INFO("server.loading",
+            "StrictAltbotGuild: {} could not restock hunter ammo at {} ({} ammo, {} copper available); retrying in {} seconds",
+            bot->GetName(), serviceNpc->GetName(), GetHunterAmmoCount(botAI),
+            GetFreeMoney(botAI, NeedMoneyFor::ammo), FailedAmmoTripRetryMs / 1000);
+        ServiceTrips.erase(guid);
+        botAI->rpgInfo.ChangeToIdle();
+        return;
+    }
 
     if (serviceNpc->HasNpcFlag(UNIT_NPC_FLAG_REPAIR) && CanAffordRepair(botAI))
         botAI->DoSpecificAction("repair", Event("strict altbot rpg"), true);
@@ -1120,6 +1177,7 @@ void StrictAltbotHolder::RemoveBot(ObjectGuid guid)
     ServiceTripsWithSuppressedGrind.erase(guid);
     LastServiceChecks.erase(guid);
     LastQuestItemChecks.erase(guid);
+    LastFailedAmmoTrips.erase(guid);
     _loginCallbacks.erase(guid);
     RemoveFromPlayerbotsMap(guid);
 }
@@ -1133,5 +1191,6 @@ void StrictAltbotHolder::Shutdown()
     ServiceTripsWithSuppressedGrind.clear();
     LastServiceChecks.clear();
     LastQuestItemChecks.clear();
+    LastFailedAmmoTrips.clear();
     LogoutAllBots();
 }
