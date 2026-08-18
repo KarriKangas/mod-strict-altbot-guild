@@ -843,9 +843,11 @@ void StrictAltbotHolder::Update(uint32 diff)
             continue;
         }
 
-        auto pending = std::move(callback->second);
-        callback = _loginCallbacks.erase(callback);
-        pending(bot);
+        callback->second(bot);
+        if (bot->GetGuildId())
+            callback = _loginCallbacks.erase(callback);
+        else
+            ++callback;
     }
 
     if (onlineCount != _lastOnlineCount)
@@ -1178,7 +1180,6 @@ void StrictAltbotHolder::RemoveBot(ObjectGuid guid)
     LastServiceChecks.erase(guid);
     LastQuestItemChecks.erase(guid);
     LastFailedAmmoTrips.erase(guid);
-    _loginCallbacks.erase(guid);
     RemoveFromPlayerbotsMap(guid);
 }
 
