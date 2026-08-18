@@ -16,6 +16,7 @@
 #include "PlayerbotAIConfig.h"
 #include "Playerbots.h"
 #include "QueryResult.h"
+#include "QuestDef.h"
 #include "StrictAltbotMgr.h"
 #include "Timer.h"
 #include "Trainer.h"
@@ -32,22 +33,37 @@ namespace
 {
 constexpr float MaxVendorTripDistance = 5000.0f;
 constexpr uint32 HunterAmmoRestockThreshold = 200;
+constexpr uint32 QuestItemCheckIntervalMs = 5000;
 
 enum class ServiceTripKind
 {
     Sell,
-    Ammo
+    Ammo,
+    QuestItem
 };
 
 struct ServiceTrip
 {
-    ServiceTripKind kind;
-    WorldPosition destination;
+    ServiceTripKind kind = ServiceTripKind::Sell;
+    WorldPosition destination{};
+    ObjectGuid target{};
+    uint32 questId = 0;
+    uint32 itemId = 0;
+    uint32 requiredCount = 0;
+};
+
+struct QuestItemVendorMatch
+{
+    Creature* npc = nullptr;
+    uint32 questId = 0;
+    uint32 itemId = 0;
+    uint32 requiredCount = 0;
 };
 
 std::unordered_map<ObjectGuid, ServiceTrip> ServiceTrips;
 std::unordered_set<ObjectGuid> ServiceTripsWithSuppressedGrind;
 std::unordered_map<ObjectGuid, uint32> LastServiceChecks;
+std::unordered_map<ObjectGuid, uint32> LastQuestItemChecks;
 
 uint8 GetBagSpace(PlayerbotAI* botAI)
 {
@@ -180,6 +196,137 @@ bool IsUsableServiceNpc(Player* bot, Creature* npc)
 {
     return npc && npc->IsInWorld() && !npc->IsDuringRemoveFromWorld() && npc->IsAlive() &&
            npc->GetReactionTo(bot) > REP_UNFRIENDLY;
+}
+
+bool IsQuestItemStillNeeded(Player* bot, ServiceTrip const& trip)
+{
+    if (trip.kind != ServiceTripKind::QuestItem || !trip.questId || !trip.itemId || !trip.requiredCount)
+        return false;
+
+    if (bot->GetQuestStatus(trip.questId) != QUEST_STATUS_INCOMPLETE)
+        return false;
+
+    return bot->GetItemCount(trip.itemId, false) < trip.requiredCount;
+}
+
+std::optional<QuestItemVendorMatch> FindNearbyQuestItemVendor(
+    Player* bot, PlayerbotAI* botAI, GuidVector const& targets)
+{
+    if (GetBagSpace(botAI) >= 100)
+        return std::nullopt;
+
+    uint32 freeMoney = GetFreeMoney(botAI, NeedMoneyFor::anything);
+    QuestStatusMap const& questStatusMap = bot->getQuestStatusMap();
+
+    for (ObjectGuid const& guid : targets)
+    {
+        Creature* npc = ObjectAccessor::GetCreatureOrPetOrVehicle(*bot, guid);
+        if (!IsUsableServiceNpc(bot, npc) || !npc->HasNpcFlag(UNIT_NPC_FLAG_VENDOR))
+            continue;
+
+        VendorItemData const* items = npc->GetVendorItems();
+        if (!items)
+            continue;
+
+        float discount = bot->GetReputationPriceDiscount(npc);
+
+        for (auto const& [questId, statusData] : questStatusMap)
+        {
+            if (statusData.Status != QUEST_STATUS_INCOMPLETE)
+                continue;
+
+            Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
+            if (!quest)
+                continue;
+
+            for (uint32 objective = 0; objective < QUEST_ITEM_OBJECTIVES_COUNT; ++objective)
+            {
+                uint32 itemId = quest->RequiredItemId[objective];
+                uint32 requiredCount = quest->RequiredItemCount[objective];
+                if (!itemId || !requiredCount || statusData.ItemCount[objective] >= requiredCount)
+                    continue;
+
+                for (VendorItem const* vendorItem : items->m_items)
+                {
+                    if (!vendorItem || vendorItem->ExtendedCost || vendorItem->item != itemId)
+                        continue;
+
+                    if (vendorItem->maxcount && !npc->GetVendorItemCurrentCount(vendorItem))
+                        continue;
+
+                    ItemTemplate const* item = sObjectMgr->GetItemTemplate(itemId);
+                    if (!item)
+                        continue;
+
+                    uint32 price = static_cast<uint32>(std::floor(item->BuyPrice * discount));
+                    if (freeMoney < price)
+                        continue;
+
+                    return QuestItemVendorMatch{npc, questId, itemId, requiredCount};
+                }
+            }
+        }
+    }
+
+    return std::nullopt;
+}
+
+bool BuyRequiredQuestItem(Player* bot, PlayerbotAI* botAI, Creature* npc, ServiceTrip const& trip)
+{
+    if (!npc || trip.kind != ServiceTripKind::QuestItem || !IsQuestItemStillNeeded(bot, trip) ||
+        GetBagSpace(botAI) >= 100)
+    {
+        return false;
+    }
+
+    VendorItemData const* items = npc->GetVendorItems();
+    if (!items)
+        return false;
+
+    float discount = bot->GetReputationPriceDiscount(npc);
+    uint32 freeMoney = GetFreeMoney(botAI, NeedMoneyFor::anything);
+
+    for (uint32 slot = 0; slot < items->GetItemCount(); ++slot)
+    {
+        VendorItem const* vendorItem = items->GetItem(slot);
+        if (!vendorItem || vendorItem->ExtendedCost || vendorItem->item != trip.itemId)
+            continue;
+
+        ItemTemplate const* item = sObjectMgr->GetItemTemplate(trip.itemId);
+        if (!item)
+            continue;
+
+        uint32 price = static_cast<uint32>(std::floor(item->BuyPrice * discount));
+        if (freeMoney < price)
+            return false;
+
+        uint32 boughtCount = 0;
+        while (bot->GetItemCount(trip.itemId, false) < trip.requiredCount && freeMoney >= price)
+        {
+            if (vendorItem->maxcount && !npc->GetVendorItemCurrentCount(vendorItem))
+                break;
+
+            uint32 oldCount = bot->GetItemCount(trip.itemId, false);
+            bot->BuyItemFromVendorSlot(npc->GetGUID(), slot, trip.itemId, 1, NULL_BAG, NULL_SLOT);
+            uint32 newCount = bot->GetItemCount(trip.itemId, false);
+            if (newCount <= oldCount)
+                break;
+
+            boughtCount += newCount - oldCount;
+            freeMoney -= price;
+        }
+
+        if (boughtCount)
+        {
+            LOG_INFO("server.loading", "StrictAltbotGuild: {} bought {} quest item {} at {} for quest {}",
+                bot->GetName(), boughtCount, trip.itemId, npc->GetName(), trip.questId);
+            return true;
+        }
+
+        return false;
+    }
+
+    return false;
 }
 
 bool TrainerHasAffordableSpell(Player* bot, PlayerbotAI* botAI, Creature* npc)
@@ -765,9 +912,52 @@ void StrictAltbotHolder::UpdateRpgServices(Player* bot)
 
     if (auto trip = ServiceTrips.find(guid); trip != ServiceTrips.end())
     {
-        bool stillNeeded = trip->second.kind == ServiceTripKind::Ammo ? needsAmmo : needsSell;
+        bool stillNeeded = false;
+        switch (trip->second.kind)
+        {
+            case ServiceTripKind::Ammo:
+                stillNeeded = needsAmmo;
+                break;
+            case ServiceTripKind::Sell:
+                stillNeeded = needsSell;
+                break;
+            case ServiceTripKind::QuestItem:
+                // Ammo is urgent and wins over a nearby optional quest-item detour.
+                stillNeeded = !needsAmmo && IsQuestItemStillNeeded(bot, trip->second);
+                break;
+        }
+
         if (!stillNeeded)
             ServiceTrips.erase(trip);
+    }
+
+    if (!ServiceTrips.contains(guid) && !needsAmmo && !needsSell && bot->IsAlive() && !bot->IsInCombat() &&
+        !bot->IsInFlight() && !bot->IsBeingTeleported())
+    {
+        uint32& lastCheck = LastQuestItemChecks[guid];
+        if (!lastCheck || GetMSTimeDiffToNow(lastCheck) >= QuestItemCheckIntervalMs)
+        {
+            lastCheck = getMSTime();
+
+            Value<GuidVector>* targetsValue =
+                botAI->GetAiObjectContext()->GetValue<GuidVector>("possible new rpg targets");
+            GuidVector targets = targetsValue ? targetsValue->Get() : GuidVector{};
+
+            if (std::optional<QuestItemVendorMatch> match = FindNearbyQuestItemVendor(bot, botAI, targets))
+            {
+                ServiceTrip trip;
+                trip.kind = ServiceTripKind::QuestItem;
+                trip.target = match->npc->GetGUID();
+                trip.questId = match->questId;
+                trip.itemId = match->itemId;
+                trip.requiredCount = match->requiredCount;
+                ServiceTrips[guid] = trip;
+
+                botAI->rpgInfo.ChangeToWanderNpc();
+                LOG_INFO("server.loading", "StrictAltbotGuild: {} noticed nearby vendor {} sells quest item {} for quest {}",
+                    bot->GetName(), match->npc->GetName(), match->itemId, match->questId);
+            }
+        }
     }
 
     UpdateServiceTripStrategy(bot, botAI);
@@ -811,11 +1001,22 @@ void StrictAltbotHolder::UpdateRpgServices(Player* bot)
 
     Value<GuidVector>* targetsValue = botAI->GetAiObjectContext()->GetValue<GuidVector>("possible new rpg targets");
     GuidVector targets = targetsValue ? targetsValue->Get() : GuidVector{};
-    Creature* serviceNpc = ChooseServiceNpc(bot, botAI, targets, needsSell, needsAmmo);
+
+    auto trip = ServiceTrips.find(guid);
+    Creature* serviceNpc = nullptr;
+    if (trip != ServiceTrips.end() && trip->second.kind == ServiceTripKind::QuestItem)
+    {
+        serviceNpc = ObjectAccessor::GetCreatureOrPetOrVehicle(*bot, trip->second.target);
+        if (!IsUsableServiceNpc(bot, serviceNpc) || !serviceNpc->HasNpcFlag(UNIT_NPC_FLAG_VENDOR))
+            serviceNpc = nullptr;
+    }
+    else
+    {
+        serviceNpc = ChooseServiceNpc(bot, botAI, targets, needsSell, needsAmmo);
+    }
 
     if (!serviceNpc)
     {
-        auto trip = ServiceTrips.find(guid);
         if ((needsSell || needsAmmo) && trip == ServiceTrips.end())
         {
             std::optional<WorldPosition> vendorPosition = needsAmmo
@@ -850,6 +1051,14 @@ void StrictAltbotHolder::UpdateRpgServices(Player* bot)
     bot->SetTarget(serviceNpc->GetGUID());
     bot->SetFacingToObject(serviceNpc);
 
+    if (trip != ServiceTrips.end() && trip->second.kind == ServiceTripKind::QuestItem)
+    {
+        BuyRequiredQuestItem(bot, botAI, serviceNpc, trip->second);
+        ServiceTrips.erase(guid);
+        botAI->rpgInfo.ChangeToIdle();
+        return;
+    }
+
     if ((needsSell || (needsAmmo && HasSellableItems(botAI))) && serviceNpc->HasNpcFlag(UNIT_NPC_FLAG_VENDOR))
         botAI->DoSpecificAction("sell", Event("strict altbot rpg", "vendor"), true);
 
@@ -874,6 +1083,7 @@ void StrictAltbotHolder::RemoveBot(ObjectGuid guid)
     ServiceTrips.erase(guid);
     ServiceTripsWithSuppressedGrind.erase(guid);
     LastServiceChecks.erase(guid);
+    LastQuestItemChecks.erase(guid);
     _loginCallbacks.erase(guid);
     RemoveFromPlayerbotsMap(guid);
 }
@@ -886,5 +1096,6 @@ void StrictAltbotHolder::Shutdown()
     ServiceTrips.clear();
     ServiceTripsWithSuppressedGrind.clear();
     LastServiceChecks.clear();
+    LastQuestItemChecks.clear();
     LogoutAllBots();
 }
